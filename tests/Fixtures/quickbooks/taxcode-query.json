@@ -1,0 +1,60 @@
+{
+    "QueryResponse": {
+        "TaxCode": [
+            {
+                "Id": "2",
+                "Name": "TAX",
+                "Description": "TAX",
+                "Active": true,
+                "Taxable": true,
+                "TaxGroup": true,
+                "SalesTaxRateList": {
+                    "TaxRateDetail": [
+                        {
+                            "TaxRateRef": {
+                                "value": "1",
+                                "name": "NY State tax"
+                            },
+                            "TaxTypeApplicable": "TaxOnAmount",
+                            "TaxOrder": 0
+                        }
+                    ]
+                },
+                "PurchaseTaxRateList": {
+                    "TaxRateDetail": []
+                },
+                "domain": "QBO",
+                "sparse": false,
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2025-01-13T09:29:05-08:00",
+                    "LastUpdatedTime": "2025-01-13T09:29:05-08:00"
+                }
+            },
+            {
+                "Id": "3",
+                "Name": "NON",
+                "Description": "NON",
+                "Active": true,
+                "Taxable": false,
+                "TaxGroup": true,
+                "SalesTaxRateList": {
+                    "TaxRateDetail": []
+                },
+                "PurchaseTaxRateList": {
+                    "TaxRateDetail": []
+                },
+                "domain": "QBO",
+                "sparse": false,
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2025-01-13T09:29:05-08:00",
+                    "LastUpdatedTime": "2025-01-13T09:29:05-08:00"
+                }
+            }
+        ],
+        "startPosition": 1,
+        "maxResults": 2
+    },
+    "time": "2026-08-21T10:33:01.145-07:00"
+}

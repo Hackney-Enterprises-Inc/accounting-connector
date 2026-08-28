@@ -1,0 +1,97 @@
+{
+    "QueryResponse": {
+        "Account": [
+            {
+                "Id": "35",
+                "Name": "Checking",
+                "SubAccount": false,
+                "FullyQualifiedName": "Checking",
+                "Active": true,
+                "Classification": "Asset",
+                "AccountType": "Bank",
+                "AccountSubType": "Checking",
+                "CurrentBalance": 1201.0,
+                "CurrentBalanceWithSubAccounts": 1201.0,
+                "CurrencyRef": {
+                    "value": "USD",
+                    "name": "United States Dollar"
+                },
+                "domain": "QBO",
+                "sparse": false,
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2025-01-13T09:29:05-08:00",
+                    "LastUpdatedTime": "2026-08-20T14:02:19-07:00"
+                }
+            },
+            {
+                "Id": "63",
+                "Name": "Office Supplies",
+                "AcctNum": "6000",
+                "SubAccount": false,
+                "FullyQualifiedName": "Office Supplies",
+                "Active": true,
+                "Classification": "Expense",
+                "AccountType": "Expense",
+                "AccountSubType": "OfficeGeneralAdministrativeExpenses",
+                "CurrencyRef": {
+                    "value": "USD",
+                    "name": "United States Dollar"
+                },
+                "domain": "QBO",
+                "sparse": false,
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2025-01-13T09:29:05-08:00",
+                    "LastUpdatedTime": "2025-01-13T09:29:05-08:00"
+                }
+            },
+            {
+                "Id": "79",
+                "Name": "Consulting Income",
+                "SubAccount": false,
+                "FullyQualifiedName": "Consulting Income",
+                "Active": true,
+                "Classification": "Revenue",
+                "AccountType": "Income",
+                "AccountSubType": "ServiceFeeIncome",
+                "CurrencyRef": {
+                    "value": "USD",
+                    "name": "United States Dollar"
+                },
+                "domain": "QBO",
+                "sparse": false,
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2025-01-13T09:29:05-08:00",
+                    "LastUpdatedTime": "2025-01-13T09:29:05-08:00"
+                }
+            },
+            {
+                "Id": "41",
+                "Name": "Visa",
+                "SubAccount": false,
+                "FullyQualifiedName": "Visa",
+                "Active": true,
+                "Classification": "Liability",
+                "AccountType": "Credit Card",
+                "AccountSubType": "CreditCard",
+                "CurrentBalance": -430.55,
+                "CurrencyRef": {
+                    "value": "USD",
+                    "name": "United States Dollar"
+                },
+                "domain": "QBO",
+                "sparse": false,
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2025-01-13T09:29:05-08:00",
+                    "LastUpdatedTime": "2026-08-01T08:11:41-07:00"
+                }
+            }
+        ],
+        "startPosition": 1,
+        "maxResults": 4
+    },
+    "time": "2026-08-21T10:33:01.145-07:00"
+}

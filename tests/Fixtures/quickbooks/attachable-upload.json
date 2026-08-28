@@ -1,0 +1,30 @@
+{
+    "AttachableResponse": [
+        {
+            "Attachable": {
+                "Id": "5000000000000091308",
+                "SyncToken": "0",
+                "domain": "QBO",
+                "sparse": false,
+                "FileName": "receipt.pdf",
+                "FileAccessUri": "/v3/company/realm-1/download/5000000000000091308",
+                "TempDownloadUri": "https://intuit-qbo-prod-1.s3.amazonaws.com/receipt.pdf?signed",
+                "Size": 9,
+                "ContentType": "application/pdf",
+                "AttachableRef": [
+                    {
+                        "EntityRef": {
+                            "value": "101",
+                            "type": "Bill"
+                        }
+                    }
+                ],
+                "MetaData": {
+                    "CreateTime": "2026-08-21T10:33:00-07:00",
+                    "LastUpdatedTime": "2026-08-21T10:33:00-07:00"
+                }
+            }
+        }
+    ],
+    "time": "2026-08-21T10:33:01.145-07:00"
+}

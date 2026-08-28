@@ -1,0 +1,14 @@
+{
+    "Fault": {
+        "Error": [
+            {
+                "Message": "Invalid Reference Id",
+                "Detail": "Invalid Reference Id : Accounts element id 999 not found",
+                "code": "2500",
+                "element": "AccountRef"
+            }
+        ],
+        "type": "ValidationFault"
+    },
+    "time": "2026-08-21T10:33:01.145-07:00"
+}

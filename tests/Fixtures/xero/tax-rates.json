@@ -1,0 +1,71 @@
+{
+    "Id": "1c3f0e6a-2b64-4a1e-8d5b-6f4a2c9e7b31",
+    "Status": "OK",
+    "ProviderName": "Mittro",
+    "DateTimeUTC": "\/Date(1756400000000)\/",
+    "TaxRates": [
+        {
+            "Name": "Tax on Purchases",
+            "TaxType": "INPUT2",
+            "ReportTaxType": "INPUT",
+            "CanApplyToAssets": true,
+            "CanApplyToEquity": false,
+            "CanApplyToExpenses": true,
+            "CanApplyToLiabilities": false,
+            "CanApplyToRevenue": false,
+            "DisplayTaxRate": 15.0,
+            "EffectiveRate": 15.0,
+            "Status": "ACTIVE",
+            "TaxComponents": [
+                {
+                    "Name": "GST",
+                    "Rate": 15.0,
+                    "IsCompound": false,
+                    "IsNonRecoverable": false
+                }
+            ]
+        },
+        {
+            "Name": "Tax on Sales",
+            "TaxType": "OUTPUT2",
+            "ReportTaxType": "OUTPUT",
+            "CanApplyToAssets": false,
+            "CanApplyToEquity": false,
+            "CanApplyToExpenses": false,
+            "CanApplyToLiabilities": true,
+            "CanApplyToRevenue": true,
+            "DisplayTaxRate": 15.0,
+            "EffectiveRate": 15.0,
+            "Status": "ACTIVE",
+            "TaxComponents": [
+                {
+                    "Name": "GST",
+                    "Rate": 15.0,
+                    "IsCompound": false,
+                    "IsNonRecoverable": false
+                }
+            ]
+        },
+        {
+            "Name": "Tax Exempt",
+            "TaxType": "NONE",
+            "ReportTaxType": "NONE",
+            "CanApplyToAssets": true,
+            "CanApplyToEquity": true,
+            "CanApplyToExpenses": true,
+            "CanApplyToLiabilities": true,
+            "CanApplyToRevenue": true,
+            "DisplayTaxRate": 0.0,
+            "EffectiveRate": 0.0,
+            "Status": "ACTIVE",
+            "TaxComponents": [
+                {
+                    "Name": "No Tax",
+                    "Rate": 0.0,
+                    "IsCompound": false,
+                    "IsNonRecoverable": false
+                }
+            ]
+        }
+    ]
+}

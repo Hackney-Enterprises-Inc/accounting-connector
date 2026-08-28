@@ -1,0 +1,48 @@
+{
+    "Id": "7e2d1b4c-8a5f-4c3e-9b6d-2f1a0c8e5d42",
+    "Status": "OK",
+    "ProviderName": "Mittro",
+    "DateTimeUTC": "/Date(1756400000000)/",
+    "TrackingCategories": [
+        {
+            "TrackingCategoryID": "cat-region",
+            "Name": "Region",
+            "Status": "ACTIVE",
+            "Options": [
+                {
+                    "TrackingOptionID": "opt-south",
+                    "Name": "South",
+                    "Status": "ACTIVE"
+                },
+                {
+                    "TrackingOptionID": "opt-north",
+                    "Name": "North",
+                    "Status": "ACTIVE"
+                },
+                {
+                    "TrackingOptionID": "opt-gone",
+                    "Name": "Retired Region",
+                    "Status": "ARCHIVED"
+                }
+            ]
+        },
+        {
+            "TrackingCategoryID": "cat-dead",
+            "Name": "Old Dimension",
+            "Status": "ARCHIVED",
+            "Options": []
+        },
+        {
+            "TrackingCategoryID": "cat-dba",
+            "Name": "DBA",
+            "Status": "ACTIVE",
+            "Options": [
+                {
+                    "TrackingOptionID": "opt-main",
+                    "Name": "Main Street",
+                    "Status": "ACTIVE"
+                }
+            ]
+        }
+    ]
+}

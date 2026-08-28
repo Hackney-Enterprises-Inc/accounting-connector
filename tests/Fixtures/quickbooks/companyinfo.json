@@ -1,0 +1,32 @@
+{
+    "CompanyInfo": {
+        "Id": "1",
+        "SyncToken": "4",
+        "domain": "QBO",
+        "sparse": false,
+        "CompanyName": "Sandbox Company_US_1",
+        "LegalName": "Sandbox Company_US_1 LLC",
+        "CompanyAddr": {
+            "Id": "1",
+            "Line1": "123 Sierra Way",
+            "City": "San Pablo",
+            "CountrySubDivisionCode": "CA",
+            "PostalCode": "87999"
+        },
+        "Country": "US",
+        "CompanyStartDate": "2025-01-13",
+        "FiscalYearStartMonth": "January",
+        "SupportedLanguages": "en",
+        "NameValue": [
+            {
+                "Name": "NeoEnabled",
+                "Value": "true"
+            }
+        ],
+        "MetaData": {
+            "CreateTime": "2025-01-13T09:29:05-08:00",
+            "LastUpdatedTime": "2026-08-01T08:11:41-07:00"
+        }
+    },
+    "time": "2026-08-21T10:33:01.145-07:00"
+}

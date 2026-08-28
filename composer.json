@@ -1,0 +1,80 @@
+{
+    "name": "hei/accounting-connector",
+    "description": "Provider-agnostic accounting connector for Xero and QuickBooks Online: OAuth2, canonical AR/AP entities, entity mapping, idempotency and attachments.",
+    "keywords": [
+        "accounting",
+        "xero",
+        "quickbooks",
+        "qbo",
+        "oauth2",
+        "laravel",
+        "connector"
+    ],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Hackney Enterprises Inc",
+            "email": "dev@hei.software"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "php-http/discovery": "^1.19",
+        "psr/event-dispatcher": "^1.0",
+        "psr/http-client": "^1.0",
+        "psr/http-client-implementation": "*",
+        "psr/http-factory": "^1.0",
+        "psr/http-factory-implementation": "*",
+        "psr/http-message": "^1.1|^2.0",
+        "psr/log": "^3.0",
+        "psr/simple-cache": "^3.0"
+    },
+    "require-dev": {
+        "guzzlehttp/guzzle": "^7.8",
+        "illuminate/contracts": "^12.0|^13.0",
+        "illuminate/database": "^12.0|^13.0",
+        "illuminate/support": "^12.0|^13.0",
+        "laravel/pint": "^1.18",
+        "orchestra/testbench": "^10.0|^11.0",
+        "pestphp/pest": "^3.5|^4.0",
+        "phpstan/phpstan": "^2.0"
+    },
+    "suggest": {
+        "illuminate/support": "Enables the Laravel service provider, facade, config and database-backed entity map."
+    },
+    "autoload": {
+        "psr-4": {
+            "Hei\\AccountingConnector\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Hei\\AccountingConnector\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Hei\\AccountingConnector\\Laravel\\AccountingConnectorServiceProvider"
+            ],
+            "aliases": {
+                "AccountingConnectors": "Hei\\AccountingConnector\\Laravel\\Facades\\AccountingConnectors"
+            }
+        }
+    },
+    "scripts": {
+        "test": "pest",
+        "analyse": "phpstan analyse",
+        "format": "pint"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

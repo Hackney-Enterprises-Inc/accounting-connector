@@ -1,0 +1,17 @@
+{
+    "ErrorNumber": 10,
+    "Type": "ValidationException",
+    "Message": "A validation exception occurred",
+    "Elements": [
+        {
+            "ValidationErrors": [
+                {
+                    "Message": "Account code '999' is not a valid code for this document."
+                },
+                {
+                    "Message": "The TaxType field is mandatory."
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,55 @@
+{
+    "Id": "9b9ab9e7-59a4-4f3a-9f3a-4b1c0e6f2d11",
+    "Status": "OK",
+    "ProviderName": "Mittro",
+    "DateTimeUTC": "\/Date(1756400000000)\/",
+    "Accounts": [
+        {
+            "AccountID": "bank-uuid",
+            "Code": "090",
+            "Name": "Business Checking",
+            "Type": "BANK",
+            "BankAccountNumber": "0908826",
+            "Status": "ACTIVE",
+            "BankAccountType": "BANK",
+            "CurrencyCode": "USD",
+            "EnablePaymentsToAccount": false,
+            "ShowInExpenseClaims": false,
+            "Class": "ASSET",
+            "ReportingCode": "ASS",
+            "HasAttachments": false,
+            "UpdatedDateUTC": "\/Date(1573755038314+0000)\/",
+            "AddToWatchlist": false
+        },
+        {
+            "AccountID": "exp-uuid",
+            "Code": "400",
+            "Name": "General Expenses",
+            "Type": "EXPENSE",
+            "Status": "ACTIVE",
+            "Description": "General expenses",
+            "TaxType": "INPUT2",
+            "EnablePaymentsToAccount": false,
+            "ShowInExpenseClaims": true,
+            "Class": "EXPENSE",
+            "HasAttachments": false,
+            "UpdatedDateUTC": "\/Date(1573755038314+0000)\/",
+            "AddToWatchlist": false
+        },
+        {
+            "AccountID": "rev-uuid",
+            "Code": "200",
+            "Name": "Consulting Income",
+            "Type": "REVENUE",
+            "Status": "ACTIVE",
+            "Description": "Income from consulting services",
+            "TaxType": "OUTPUT2",
+            "EnablePaymentsToAccount": false,
+            "ShowInExpenseClaims": false,
+            "Class": "REVENUE",
+            "HasAttachments": false,
+            "UpdatedDateUTC": "\/Date(1573755038314+0000)\/",
+            "AddToWatchlist": false
+        }
+    ]
+}

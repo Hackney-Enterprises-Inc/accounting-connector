@@ -1,0 +1,13 @@
+{
+    "Fault": {
+        "Error": [
+            {
+                "Message": "Duplicate Name Exists Error",
+                "Detail": "The name supplied already exists. : Id=19",
+                "code": "6240"
+            }
+        ],
+        "type": "ValidationFault"
+    },
+    "time": "2026-08-28T11:14:55.141-07:00"
+}

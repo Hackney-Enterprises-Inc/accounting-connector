@@ -1,0 +1,26 @@
+{
+    "Item": {
+        "Name": "Design income (synced)",
+        "Active": true,
+        "FullyQualifiedName": "Design income (synced)",
+        "Taxable": false,
+        "UnitPrice": 0,
+        "Type": "Service",
+        "IncomeAccountRef": {
+            "value": "82",
+            "name": "Design income"
+        },
+        "PurchaseCost": 0,
+        "TrackQtyOnHand": false,
+        "DeferredRevenue": false,
+        "domain": "QBO",
+        "sparse": false,
+        "Id": "19",
+        "SyncToken": "0",
+        "MetaData": {
+            "CreateTime": "2026-08-28T11:14:54-07:00",
+            "LastUpdatedTime": "2026-08-28T11:14:54-07:00"
+        }
+    },
+    "time": "2026-08-28T11:14:54.278-07:00"
+}

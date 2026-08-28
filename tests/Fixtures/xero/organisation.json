@@ -1,0 +1,35 @@
+{
+    "Id": "2a8b6c4d-9e1f-4a7b-8c3d-5e2f1a0b9c87",
+    "Status": "OK",
+    "ProviderName": "Mittro",
+    "DateTimeUTC": "\/Date(1756400000000)\/",
+    "Organisations": [
+        {
+            "OrganisationID": "tenant-1",
+            "APIKey": "",
+            "Name": "Demo Company (US)",
+            "LegalName": "Demo Company Incorporated",
+            "PaysTax": true,
+            "Version": "US",
+            "OrganisationType": "COMPANY",
+            "BaseCurrency": "USD",
+            "CountryCode": "US",
+            "IsDemoCompany": false,
+            "OrganisationStatus": "ACTIVE",
+            "FinancialYearEndDay": 31,
+            "FinancialYearEndMonth": 12,
+            "SalesTaxBasis": "ACCRUALS",
+            "DefaultSalesTax": "Tax Exclusive",
+            "DefaultPurchasesTax": "Tax Exclusive",
+            "CreatedDateUTC": "\/Date(1436947200000)\/",
+            "Timezone": "PACIFICSTANDARDTIME",
+            "OrganisationEntityType": "COMPANY",
+            "Class": "PREMIUM",
+            "Edition": "BUSINESS",
+            "Addresses": [],
+            "Phones": [],
+            "ExternalLinks": [],
+            "PaymentTerms": {}
+        }
+    ]
+}

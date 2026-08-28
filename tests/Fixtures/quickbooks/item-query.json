@@ -1,0 +1,77 @@
+{
+    "QueryResponse": {
+        "Item": [
+            {
+                "Name": "Concrete",
+                "Description": "Concrete for fountain installation",
+                "Active": true,
+                "FullyQualifiedName": "Concrete",
+                "Taxable": true,
+                "UnitPrice": 0,
+                "Type": "Service",
+                "IncomeAccountRef": {
+                    "value": "48",
+                    "name": "Landscaping Services:Job Materials:Fountains and Garden Lighting"
+                },
+                "PurchaseCost": 0,
+                "TrackQtyOnHand": false,
+                "domain": "QBO",
+                "sparse": false,
+                "Id": "3",
+                "SyncToken": "1",
+                "MetaData": {
+                    "CreateTime": "2026-07-30T10:36:03-07:00",
+                    "LastUpdatedTime": "2026-08-02T12:47:47-07:00"
+                }
+            },
+            {
+                "Name": "Design",
+                "Description": "Custom Design",
+                "Active": true,
+                "FullyQualifiedName": "Design",
+                "Taxable": false,
+                "UnitPrice": 75,
+                "Type": "Service",
+                "IncomeAccountRef": {
+                    "value": "82",
+                    "name": "Design income"
+                },
+                "PurchaseCost": 0,
+                "TrackQtyOnHand": false,
+                "domain": "QBO",
+                "sparse": false,
+                "Id": "4",
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2026-07-30T10:41:38-07:00",
+                    "LastUpdatedTime": "2026-07-30T10:41:38-07:00"
+                }
+            },
+            {
+                "Name": "Hours",
+                "Active": true,
+                "FullyQualifiedName": "Hours",
+                "Taxable": false,
+                "UnitPrice": 0,
+                "Type": "Service",
+                "IncomeAccountRef": {
+                    "value": "1",
+                    "name": "Services"
+                },
+                "PurchaseCost": 0,
+                "TrackQtyOnHand": false,
+                "domain": "QBO",
+                "sparse": false,
+                "Id": "2",
+                "SyncToken": "0",
+                "MetaData": {
+                    "CreateTime": "2026-07-25T14:42:05-07:00",
+                    "LastUpdatedTime": "2026-07-25T14:42:05-07:00"
+                }
+            }
+        ],
+        "startPosition": 1,
+        "maxResults": 3
+    },
+    "time": "2026-08-28T11:14:53.127-07:00"
+}
