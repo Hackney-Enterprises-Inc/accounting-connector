@@ -34,6 +34,15 @@ return new class extends Migration
 
             $table->string('external_id', 191);
 
+            // The host's own owner of the connection that wrote this row, copied
+            // from Connection::reference. Nullable, and written only: no lookup is
+            // scoped by it, because a mapping belongs to the tenant rather than to
+            // whoever posted it, and scoping by owner would re-create the same
+            // entity for a second owner on the same tenant. It is here so a row can
+            // be traced back to the tenant that wrote it, and so a host that later
+            // needs per-owner reporting has the column already populated.
+            $table->string('owner_id', 191)->nullable();
+
             $table->timestamps();
 
             // One external id per local entity per tenant. This is what makes
@@ -47,6 +56,14 @@ return new class extends Migration
             $table->index(
                 ['provider', 'tenant_id', 'entity_type', 'external_id'],
                 'accounting_entity_map_external_index',
+            );
+
+            // "Everything this owner has posted to this provider", for auditing and
+            // for the per-owner reporting above. Deliberately not unique: one owner
+            // posts many entities of a type.
+            $table->index(
+                ['provider', 'owner_id', 'entity_type'],
+                'accounting_entity_map_owner_index',
             );
         });
     }

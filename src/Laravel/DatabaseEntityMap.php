@@ -50,6 +50,7 @@ final class DatabaseEntityMap implements EntityMap
     public function remember(Connection $connection, EntityType $type, string $localId, string $externalId): void
     {
         $now = $this->query()->getConnection()->raw('CURRENT_TIMESTAMP');
+        $owner = $connection->reference;
 
         // upsert rather than insert: a re-sync of the same document must replace the
         // mapping, not collide with the unique index and blow up a queue job.
@@ -60,11 +61,18 @@ final class DatabaseEntityMap implements EntityMap
                 'entity_type' => $type->value,
                 'local_id' => $localId,
                 'external_id' => $externalId,
+                // Audit only, never read back here: the host's owner of the
+                // connection that wrote the row, so a mapping can be traced to the
+                // tenant it was posted for. A connection carrying no reference
+                // stores null rather than an empty string, so unknown reads as
+                // unknown. Refreshed on every upsert, because a row naming an owner
+                // that no longer writes it is worse than a row naming none.
+                'owner_id' => ($owner === null || $owner === '') ? null : $owner,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]],
             ['provider', 'tenant_id', 'entity_type', 'local_id'],
-            ['external_id', 'updated_at'],
+            ['external_id', 'owner_id', 'updated_at'],
         );
     }
 

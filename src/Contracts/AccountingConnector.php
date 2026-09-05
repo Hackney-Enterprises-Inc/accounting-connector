@@ -10,6 +10,7 @@ use Hei\AccountingConnector\Data\AttachmentResult;
 use Hei\AccountingConnector\Data\AttachmentSet;
 use Hei\AccountingConnector\Data\AuthorizationResult;
 use Hei\AccountingConnector\Data\Connection;
+use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\TaxCode;
 use Hei\AccountingConnector\Data\TenantInfo;
 use Hei\AccountingConnector\Data\TrackingCategory;
@@ -94,6 +95,25 @@ interface AccountingConnector
      * find out until the first transaction lands in a stranger's ledger.
      */
     public function tenantInfo(Connection $connection): ?TenantInfo;
+
+    /**
+     * The provider's id for this contact, creating it if the provider has never
+     * seen it.
+     *
+     * Part of the interface because hosts need it on its own, ahead of any
+     * document: to show the customer which vendor a receipt will post against, and
+     * to code a line before the bill exists. It is also what every create path uses
+     * internally, so a host that had to reach for the concrete connector to call it
+     * could not swap in a test double for the whole sync path.
+     *
+     * The entity map answers first, keyed on ContactData::mapKey(), so a repeat
+     * post costs no round trip and does not re-match on a name the customer may
+     * have edited since.
+     *
+     * @throws ValidationException when the provider refuses the contact
+     * @throws ConnectionRevokedException when the connection is dead
+     */
+    public function resolveContact(ContactData $contact, Connection $connection): string;
 
     /**
      * Create an entity and return the provider's id for it.

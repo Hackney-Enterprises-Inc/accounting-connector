@@ -6,7 +6,10 @@ use Hei\AccountingConnector\Connectors\Xero\XeroConnector;
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentSet;
 use Hei\AccountingConnector\Data\BillData;
+use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Data\ExpenseData;
+use Hei\AccountingConnector\Data\JournalData;
+use Hei\AccountingConnector\Data\JournalLine;
 use Hei\AccountingConnector\Data\LineItem;
 use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
@@ -242,6 +245,138 @@ it('records the entity map entry under the local id after a successful post', fu
     xero($fake, $map)->createEntity(EntityType::Bill, billFor(), connection());
 
     expect($map->externalId(connection(), EntityType::Bill, 'doc-42'))->toBe('invoice-1');
+});
+
+it('posts a manual journal as POSTED, which is the only word Xero takes there', function () {
+    // Manual journals have their own status vocabulary: AUTHORISED, correct
+    // everywhere else, is a 400 here.
+    $fake = fakeHttp();
+    $fake->queue(200, providerResponse('xero/manual-journal-created'));
+
+    $journal = new JournalData(
+        narration: 'Payout 2026-08-21',
+        date: new DateTimeImmutable('2026-08-21'),
+        lines: [
+            new JournalLine('200', Money::cents(10000), 'Gross'),
+            new JournalLine('404', Money::cents(-10000), 'Clearing'),
+        ],
+        localId: 'payout-7',
+    );
+
+    $id = xero($fake)->createEntity(EntityType::Journal, $journal, connection(), 'sync-journal-payout-7');
+
+    $body = $fake->requestBody(0)['ManualJournals'][0];
+
+    expect($id)->toBe('journal-1')
+        ->and($fake->requests[0]->getMethod())->toBe('POST')
+        ->and((string) $fake->requests[0]->getUri())->toBe(XeroConnector::API_BASE.'/ManualJournals')
+        ->and($fake->requests[0]->getHeaderLine('Idempotency-Key'))->toBe('sync-journal-payout-7')
+        ->and($body['Status'])->toBe('POSTED')
+        ->and($body['Narration'])->toBe('Payout 2026-08-21')
+        ->and($body['Date'])->toBe('2026-08-21')
+        ->and($body['LineAmountTypes'])->toBe('NoTax')
+        // Debits positive, credits negative, which is Xero's own convention.
+        ->and((float) $body['JournalLines'][0]['LineAmount'])->toBe(100.0)
+        ->and($body['JournalLines'][0]['AccountCode'])->toBe('200')
+        ->and((float) $body['JournalLines'][1]['LineAmount'])->toBe(-100.0)
+        ->and($fake->isDrained())->toBeTrue();
+});
+
+it('remembers the manual journal id against the local id it was posted for', function () {
+    $map = new ArrayEntityMap;
+    $fake = fakeHttp();
+    $fake->queue(200, providerResponse('xero/manual-journal-created'));
+
+    $journal = new JournalData(
+        narration: 'Payout 2026-08-21',
+        date: new DateTimeImmutable('2026-08-21'),
+        lines: [
+            new JournalLine('200', Money::cents(10000)),
+            new JournalLine('404', Money::cents(-10000)),
+        ],
+        localId: 'payout-7',
+    );
+
+    xero($fake, $map)->createEntity(EntityType::Journal, $journal, connection());
+
+    expect($map->externalId(connection(), EntityType::Journal, 'payout-7'))->toBe('journal-1');
+});
+
+it('updates an entity by posting the whole body back to the resource id', function () {
+    // Xero replaces rather than merges, so an update sends everything, and it
+    // wants its own id inside the body as well as in the path. Sending only what
+    // changed deletes the rest of the invoice.
+    $map = new ArrayEntityMap;
+    $map->remember(connection(), EntityType::Vendor, 'name:acme supply', 'contact-1');
+
+    $fake = fakeHttp();
+    $fake->queue(200, providerResponse('xero/invoice-created'));
+
+    $updated = xero($fake, $map)->updateEntity(EntityType::Bill, 'invoice-1', billFor(), connection());
+
+    $body = $fake->requestBody(0)['Invoices'][0];
+
+    expect($updated)->toBeTrue()
+        ->and($fake->requests)->toHaveCount(1)
+        ->and($fake->requests[0]->getMethod())->toBe('POST')
+        ->and((string) $fake->requests[0]->getUri())->toBe(XeroConnector::API_BASE.'/Invoices/invoice-1')
+        ->and($body['InvoiceID'])->toBe('invoice-1')
+        ->and($body['Type'])->toBe('ACCPAY')
+        ->and($body['Contact'])->toBe(['ContactID' => 'contact-1'])
+        ->and($body['Date'])->toBe('2026-08-21')
+        ->and($body['LineItems'][0]['AccountCode'])->toBe('400')
+        ->and((float) $body['LineItems'][0]['UnitAmount'])->toBe(25.0);
+});
+
+it('raises the provider error when an update is rejected', function () {
+    $map = new ArrayEntityMap;
+    $map->remember(connection(), EntityType::Vendor, 'name:acme supply', 'contact-1');
+
+    $fake = fakeHttp();
+    $fake->queue(400, providerResponse('xero/validation-error'));
+
+    expect(fn () => xero($fake, $map)->updateEntity(EntityType::Bill, 'invoice-1', billFor(), connection()))
+        ->toThrow(ValidationException::class);
+});
+
+it('revokes by finding the connection id for the tenant and deleting it', function () {
+    // Xero revokes by deleting the connection, and a connection is keyed by its
+    // own id rather than by the tenant id, so the list has to be walked first. A
+    // bookkeeper may have authorised several organisations under one token, so
+    // deleting the first entry would disconnect a company nobody asked about.
+    $fake = fakeHttp();
+    $fake->queue(200, providerResponse('xero/connections'));
+    $fake->queue(200, []);
+
+    $second = new Connection(
+        provider: Provider::Xero,
+        tenantId: 'tenant-2',
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        expiresAt: (new DateTimeImmutable)->modify('+30 minutes'),
+        reference: 'org-99',
+    );
+
+    $revoked = xero($fake)->revoke($second);
+
+    expect($revoked)->toBeTrue()
+        ->and($fake->requests)->toHaveCount(2)
+        ->and($fake->requests[0]->getMethod())->toBe('GET')
+        ->and((string) $fake->requests[0]->getUri())->toBe(XeroConnector::CONNECTIONS_URL)
+        ->and($fake->requests[1]->getMethod())->toBe('DELETE')
+        ->and((string) $fake->requests[1]->getUri())
+        ->toBe(XeroConnector::CONNECTIONS_URL.'/0f3e2d1c-8b7a-4d6e-9c5f-4a3b2c1d0e98')
+        ->and($fake->requests[1]->getHeaderLine('Authorization'))->toBe('Bearer access-token');
+});
+
+it('reports a failed revocation rather than throwing, so the local disconnect can proceed', function () {
+    // The customer must be able to drop credentials even when Xero will not
+    // cooperate, or they are stuck holding a connection they cannot get rid of.
+    $fake = fakeHttp();
+    $fake->queue(200, providerResponse('xero/connections'));
+    $fake->queue(400, ['Message' => 'Connection not found']);
+
+    expect(xero($fake)->revoke(connection()))->toBeFalse();
 });
 
 it('uploads an attachment as raw octets with the filename in the path', function () {

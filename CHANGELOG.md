@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `resolveContact(ContactData $contact, Connection $connection): string` is now part of the
+  `AccountingConnector` interface. Both shipped connectors already had exactly this method, so
+  nothing about their behaviour changes; what changes is that a host can resolve a vendor to its
+  provider id, ahead of any document, without type-hinting the concrete `XeroConnector` and
+  losing the ability to swap in a test double for the whole sync path.
+- `FakeConnector::resolveContact()`, recording each call in the public `$contacts` array and
+  returning `fake-contact-1`, `fake-contact-2` and so on. `nextContactId('contact-7', ...)` queues
+  specific ids for the next resolutions, a queued `failNextCreate()` fails a resolution the way it
+  fails a create (resolving is how the real connectors create a contact), and an entity type
+  refused with `doesNotSupport()` is refused here too. `flush()` clears both.
+- `owner_id` on the `accounting_entity_map` migration stub: a nullable string, indexed as
+  `(provider, owner_id, entity_type)`. `DatabaseEntityMap::remember()` writes it from
+  `Connection::$reference`, storing null when the connection carries no reference, and refreshes
+  it whenever the mapping is written again. It is written and never read: every lookup stays
+  scoped to `(provider, tenant_id, entity_type)` exactly as before, because a mapping belongs to
+  the tenant rather than to whoever posted it, and scoping by owner would re-create the same
+  entity for a second owner on the same tenant. It is there so a row can be traced back to the
+  tenant it was posted for. The `EntityMap` contract is unchanged, so a host implementation of it
+  needs no work; a host that already published the migration adds the column with its own
+  migration.
+- Wire tests for the three Xero write paths that had none: creating a manual journal (`POST
+  ManualJournals`, `POSTED` status, id read from `ManualJournals.0.ManualJournalID`), updating an
+  entity (`POST {resource}/{id}` with the complete body and the id inside it), and revoking
+  (`GET /connections`, then `DELETE /connections/{id}` for the entry matching the tenant, and a
+  false return rather than a throw when the deletion fails). New doc-derived fixture
+  `tests/Fixtures/xero/manual-journal-created.json`.
 
 ## [0.1.0] - 2026-08-28
 

@@ -12,6 +12,7 @@ use Hei\AccountingConnector\Data\AttachmentResult;
 use Hei\AccountingConnector\Data\AttachmentSet;
 use Hei\AccountingConnector\Data\AuthorizationResult;
 use Hei\AccountingConnector\Data\Connection;
+use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Data\TaxCode;
 use Hei\AccountingConnector\Data\TenantInfo;
@@ -49,6 +50,9 @@ final class FakeConnector implements AccountingConnector
     /** @var array<int, array{type: EntityType, external_id: string, attachment: AttachmentSet}> */
     public array $attached = [];
 
+    /** @var array<int, array{contact: ContactData, connection: Connection}> */
+    public array $contacts = [];
+
     /** @var array<int, Connection> */
     public array $refreshed = [];
 
@@ -77,6 +81,13 @@ final class FakeConnector implements AccountingConnector
 
     /** Makes the next create return null, then clears. */
     private bool $nextCreateReturnsNoId = false;
+
+    /**
+     * Ids handed back by the next contact resolutions, one each, then exhausted.
+     *
+     * @var array<int, string>
+     */
+    private array $contactIds = [];
 
     /** Makes tenantInfo() report an unknown tenant. */
     private bool $tenantUnknown = false;
@@ -134,6 +145,21 @@ final class FakeConnector implements AccountingConnector
     public function nextCreateReturnsNoId(): self
     {
         $this->nextCreateReturnsNoId = true;
+
+        return $this;
+    }
+
+    /**
+     * Queue the ids the next contact resolutions return.
+     *
+     * One id per call, in order, then the fake goes back to its own sequence. For
+     * a host test that has to assert against an id the provider already holds.
+     */
+    public function nextContactId(string ...$ids): self
+    {
+        foreach ($ids as $id) {
+            $this->contactIds[] = $id;
+        }
 
         return $this;
     }
@@ -217,6 +243,29 @@ final class FakeConnector implements AccountingConnector
             name: 'Fake Company',
             currencyCode: 'USD',
         );
+    }
+
+    public function resolveContact(ContactData $contact, Connection $connection): string
+    {
+        // The real connectors resolve a contact by creating it when the provider
+        // has never seen it, so this refuses what a create would refuse and honours
+        // the same queued failure.
+        $this->assertAcceptable($contact->role, $contact);
+
+        if ($this->nextFailure !== null) {
+            $failure = $this->nextFailure;
+            $this->nextFailure = null;
+
+            throw $failure;
+        }
+
+        $this->contacts[] = ['contact' => $contact, 'connection' => $connection];
+
+        if ($this->contactIds !== []) {
+            return (string) array_shift($this->contactIds);
+        }
+
+        return 'fake-contact-'.(++$this->sequence);
     }
 
     public function createEntity(
@@ -378,6 +427,7 @@ final class FakeConnector implements AccountingConnector
         $this->created = [];
         $this->updated = [];
         $this->attached = [];
+        $this->contacts = [];
         $this->refreshed = [];
         $this->sequence = 0;
         $this->lookupRefreshes = 0;
@@ -386,6 +436,7 @@ final class FakeConnector implements AccountingConnector
         $this->lookupFailure = null;
         $this->nextFailure = null;
         $this->nextAttachmentResult = null;
+        $this->contactIds = [];
         $this->unsupported = [];
     }
 }

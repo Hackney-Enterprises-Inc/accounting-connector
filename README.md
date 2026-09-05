@@ -409,6 +409,12 @@ model.
 `Connection::$reference`. The stub declares no foreign key, because the package cannot know whether
 you call your tenant an Organization or a Company. Add it yourself.
 
+`accounting_entity_map` carries a nullable `owner_id` too, written from the same reference so a
+mapping can be traced back to the tenant it was posted for. It is written and never read: lookups
+are scoped to `(provider, tenant_id, entity_type)`, because the mapping belongs to the tenant
+rather than to whoever posted it. If you published the migrations before 0.2.0, add the column and
+its `(provider, owner_id, entity_type)` index in a migration of your own.
+
 ## Testing
 
 Bind `FakeConnector` and the whole sync path is testable with no HTTP faking:
@@ -423,7 +429,9 @@ expect($fake->createdOf(EntityType::Bill))->toHaveCount(1);
 ```
 
 It can also fail on demand: `failNextCreate()`, `nextCreateReturnsNoId()`,
-`nextAttachment(AttachmentResult::failed(...))`, `failLookups()`, `doesNotSupport(...)`. And it
+`nextAttachment(AttachmentResult::failed(...))`, `failLookups()`, `doesNotSupport(...)`. Contact
+resolution is faked too: `resolveContact()` records every call in `$contacts` and hands back
+`fake-contact-1`, `fake-contact-2` and so on, or the ids you queue with `nextContactId(...)`. And it
 makes the same refusals the real connectors do — an unsupported entity type, a payload describing
 a different entity, a raw payload built for another provider — so a host test that passes the
 wrong payload fails in the test rather than in production.

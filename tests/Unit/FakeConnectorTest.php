@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
+use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\Provider;
@@ -146,4 +147,60 @@ it('can simulate a provider outage on every lookup', function () {
     $fake->failLookups(null);
 
     expect($fake->chartOfAccounts(connection()))->toBe([]);
+});
+
+it('resolves a contact to a deterministic id and records every call', function () {
+    // resolveContact() is on the interface because a host needs the vendor's
+    // provider id before any document exists. A host that had to type-hint the
+    // concrete XeroConnector to call it could not swap this fake in at all.
+    $fake = new FakeConnector(Provider::Xero);
+
+    $first = $fake->resolveContact(ContactData::vendor('Acme Supply'), connection());
+    $second = $fake->resolveContact(ContactData::customer('Globex'), connection());
+
+    expect($first)->toBe('fake-contact-1')
+        ->and($second)->toBe('fake-contact-2')
+        ->and($fake->contacts)->toHaveCount(2)
+        ->and($fake->contacts[0]['contact']->name)->toBe('Acme Supply')
+        ->and($fake->contacts[0]['contact']->role)->toBe(EntityType::Vendor)
+        ->and($fake->contacts[1]['connection']->tenantId)->toBe('tenant-1');
+});
+
+it('can be told which ids the next contact resolutions return', function () {
+    // For a host asserting against a contact the provider already holds.
+    $fake = (new FakeConnector)->nextContactId('contact-existing', 'contact-other');
+
+    expect($fake->resolveContact(ContactData::vendor('Acme Supply'), connection()))->toBe('contact-existing')
+        ->and($fake->resolveContact(ContactData::vendor('Globex'), connection()))->toBe('contact-other')
+        // Queue exhausted: back to the fake's own sequence.
+        ->and($fake->resolveContact(ContactData::vendor('Third Co'), connection()))->toStartWith('fake-contact-');
+});
+
+it('fails a contact resolution on the queued failure, like a create', function () {
+    // Resolving is how the real connectors create a contact, so the same
+    // one-shot failure covers the host's error branch for both.
+    $fake = (new FakeConnector)->failNextCreate(new ValidationException('Contact name is required'));
+
+    expect(fn () => $fake->resolveContact(ContactData::vendor('Acme Supply'), connection()))
+        ->toThrow(ValidationException::class);
+
+    expect($fake->contacts)->toBeEmpty()
+        ->and($fake->resolveContact(ContactData::vendor('Acme Supply'), connection()))->toStartWith('fake-contact-');
+});
+
+it('refuses to resolve a contact role the provider does not support', function () {
+    $fake = (new FakeConnector(Provider::QuickBooksOnline))->doesNotSupport(EntityType::Vendor);
+
+    expect(fn () => $fake->resolveContact(ContactData::vendor('Acme Supply'), connection()))
+        ->toThrow(UnsupportedEntityTypeException::class);
+});
+
+it('clears recorded contacts and queued contact ids on flush', function () {
+    $fake = (new FakeConnector)->nextContactId('contact-existing');
+    $fake->resolveContact(ContactData::vendor('Acme Supply'), connection());
+
+    $fake->flush();
+
+    expect($fake->contacts)->toBeEmpty()
+        ->and($fake->resolveContact(ContactData::vendor('Acme Supply'), connection()))->toBe('fake-contact-1');
 });

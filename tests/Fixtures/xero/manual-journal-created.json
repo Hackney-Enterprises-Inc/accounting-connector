@@ -1,0 +1,40 @@
+{
+    "Id": "6a1d4c8b-2f0e-4d7a-9b3c-5e8f1a2b3c4d",
+    "Status": "OK",
+    "ProviderName": "Mittro",
+    "DateTimeUTC": "\/Date(1756400000000)\/",
+    "ManualJournals": [
+        {
+            "ManualJournalID": "journal-1",
+            "Narration": "Payout 2026-08-21",
+            "Date": "\/Date(1755734400000+0000)\/",
+            "Status": "POSTED",
+            "LineAmountTypes": "NoTax",
+            "ShowOnCashBasisReports": true,
+            "HasAttachments": false,
+            "UpdatedDateUTC": "\/Date(1756400000000+0000)\/",
+            "JournalLines": [
+                {
+                    "Description": "Gross",
+                    "TaxType": "NONE",
+                    "TaxAmount": 0.0,
+                    "LineAmount": 100.0,
+                    "AccountCode": "200",
+                    "AccountID": "rev-uuid",
+                    "Tracking": [],
+                    "IsBlank": false
+                },
+                {
+                    "Description": "Clearing",
+                    "TaxType": "NONE",
+                    "TaxAmount": 0.0,
+                    "LineAmount": -100.0,
+                    "AccountCode": "404",
+                    "AccountID": "clearing-uuid",
+                    "Tracking": [],
+                    "IsBlank": false
+                }
+            ]
+        }
+    ]
+}
