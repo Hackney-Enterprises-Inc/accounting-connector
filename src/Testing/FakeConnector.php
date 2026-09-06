@@ -5,14 +5,21 @@ declare(strict_types=1);
 namespace Hei\AccountingConnector\Testing;
 
 use Hei\AccountingConnector\Contracts\AccountingConnector;
+use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
+use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
 use Hei\AccountingConnector\Data\AttachmentSet;
 use Hei\AccountingConnector\Data\AuthorizationResult;
+use Hei\AccountingConnector\Data\BankTransactionData;
+use Hei\AccountingConnector\Data\BankTransactionLine;
+use Hei\AccountingConnector\Data\BankTransactionPage;
+use Hei\AccountingConnector\Data\BankTransactionQuery;
 use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Data\ContactData;
+use Hei\AccountingConnector\Data\LineCoding;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Data\TaxCode;
 use Hei\AccountingConnector\Data\TenantInfo;
@@ -21,6 +28,7 @@ use Hei\AccountingConnector\Data\TrackingCategory;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
+use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\UnsupportedEntityTypeException;
 use Throwable;
 
@@ -39,7 +47,7 @@ use Throwable;
  *     expect($fake->created)->toHaveCount(1);
  *     expect($fake->createdOf(EntityType::Bill))->toHaveCount(1);
  */
-final class FakeConnector implements AccountingConnector
+final class FakeConnector implements AccountingConnector, CodesBankTransactions, ReadsBankTransactions
 {
     /** @var array<int, array{type: EntityType, payload: EntityPayload, connection: Connection, idempotency_key: string|null}> */
     public array $created = [];
@@ -68,6 +76,22 @@ final class FakeConnector implements AccountingConnector
     /** @var array<int, TrackingCategory> */
     public array $tracking = [];
 
+    /**
+     * The bank transactions this fake pretends the customer's books hold.
+     *
+     * Keyed by id so a recoding can replace one in place and a later find() sees it,
+     * which is what makes a match-then-recode flow testable end to end.
+     *
+     * @var array<string, BankTransactionData>
+     */
+    public array $bankTransactions = [];
+
+    /** @var array<int, array{query: BankTransactionQuery, connection: Connection}> */
+    public array $bankTransactionQueries = [];
+
+    /** @var array<int, array{external_id: string, codings: array<int, LineCoding>}> */
+    public array $recodings = [];
+
     /** How many times refreshLookups() was called. */
     public int $lookupRefreshes = 0;
 
@@ -94,6 +118,12 @@ final class FakeConnector implements AccountingConnector
 
     /** Thrown by every lookup until cleared. */
     private ?Throwable $lookupFailure = null;
+
+    /** Thrown by the next bank transaction call, then cleared. */
+    private ?Throwable $nextBankTransactionFailure = null;
+
+    /** Thrown by the next coding change only, then cleared. */
+    private ?Throwable $nextRecodingFailure = null;
 
     private int $sequence = 0;
 
@@ -397,6 +427,204 @@ final class FakeConnector implements AccountingConnector
     }
 
     /**
+     * Stock the fake's books with bank transactions a matcher can find.
+     */
+    public function withBankTransactions(BankTransactionData ...$transactions): self
+    {
+        foreach ($transactions as $transaction) {
+            $this->bankTransactions[$transaction->id] = $transaction;
+        }
+
+        return $this;
+    }
+
+    /**
+     * Make the next bank transaction call throw.
+     */
+    public function failNextBankTransactionCall(Throwable $exception): self
+    {
+        $this->nextBankTransactionFailure = $exception;
+
+        return $this;
+    }
+
+    /**
+     * Make the next coding change throw, leaving reads working.
+     *
+     * The case a host has to get right: a match is decided, the transaction is read
+     * back successfully, and only the recoding is refused. Failing every bank
+     * transaction call instead would fail the read and test nothing.
+     */
+    public function failNextRecoding(Throwable $exception): self
+    {
+        $this->nextRecodingFailure = $exception;
+
+        return $this;
+    }
+
+    /**
+     * Bank transactions matching the query, filtered here rather than at a provider.
+     *
+     * The filtering is real, not a stub returning everything: a host test that asks
+     * for spend in a date window and gets a receive from last year back would pass
+     * against a fake that ignored the query and fail against Xero.
+     */
+    public function listBankTransactions(Connection $connection, BankTransactionQuery $query): BankTransactionPage
+    {
+        $this->guardBankTransactions();
+
+        $this->bankTransactionQueries[] = ['query' => $query, 'connection' => $connection];
+
+        $matches = array_values(array_filter(
+            $this->bankTransactions,
+            fn (BankTransactionData $transaction): bool => $this->matchesQuery($transaction, $query),
+        ));
+
+        $offset = (max(1, $query->page) - 1) * BankTransactionQuery::PAGE_SIZE;
+
+        return new BankTransactionPage(
+            array_slice($matches, $offset, BankTransactionQuery::PAGE_SIZE),
+            $query->page,
+        );
+    }
+
+    public function findBankTransaction(Connection $connection, string $externalId): ?BankTransactionData
+    {
+        $this->guardBankTransactions();
+
+        return $this->bankTransactions[$externalId] ?? null;
+    }
+
+    /**
+     * Apply coding and keep the result, so a later find() answers with it.
+     *
+     * @param  array<int, LineCoding>  $codings
+     */
+    public function updateBankTransactionCoding(
+        Connection $connection,
+        string $externalId,
+        array $codings,
+    ): BankTransactionData {
+        $this->guardBankTransactions();
+
+        if ($this->nextRecodingFailure !== null) {
+            $failure = $this->nextRecodingFailure;
+            $this->nextRecodingFailure = null;
+
+            throw $failure;
+        }
+
+        $current = $this->bankTransactions[$externalId] ?? null;
+
+        if ($current === null) {
+            throw new NotFoundException(
+                "The fake connector holds no bank transaction {$externalId}.",
+                $this->provider,
+            );
+        }
+
+        $this->recodings[] = ['external_id' => $externalId, 'codings' => $codings];
+
+        $lines = array_map(
+            function (BankTransactionLine $line) use ($codings): BankTransactionLine {
+                $accountCode = $line->accountCode;
+                $tracking = $line->tracking;
+
+                foreach ($codings as $coding) {
+                    if (! $coding->appliesTo($line->lineItemId)) {
+                        continue;
+                    }
+
+                    $accountCode = $coding->accountCode ?? $accountCode;
+                    $tracking = $coding->tracking ?? $tracking;
+                }
+
+                return new BankTransactionLine(
+                    lineItemId: $line->lineItemId,
+                    description: $line->description,
+                    quantity: $line->quantity,
+                    unitAmount: $line->unitAmount,
+                    lineAmount: $line->lineAmount,
+                    accountCode: $accountCode,
+                    accountId: $line->accountId,
+                    taxType: $line->taxType,
+                    tracking: $tracking,
+                );
+            },
+            $current->lines,
+        );
+
+        $recoded = new BankTransactionData(
+            id: $current->id,
+            type: $current->type,
+            date: $current->date,
+            total: $current->total,
+            subTotal: $current->subTotal,
+            totalTax: $current->totalTax,
+            currency: $current->currency,
+            status: $current->status,
+            contactId: $current->contactId,
+            contactName: $current->contactName,
+            bankAccountId: $current->bankAccountId,
+            bankAccountName: $current->bankAccountName,
+            reference: $current->reference,
+            isReconciled: $current->isReconciled,
+            hasAttachments: $current->hasAttachments,
+            lines: $lines,
+            updatedDateUtc: $current->updatedDateUtc,
+        );
+
+        $this->bankTransactions[$externalId] = $recoded;
+
+        return $recoded;
+    }
+
+    private function matchesQuery(BankTransactionData $transaction, BankTransactionQuery $query): bool
+    {
+        if ($query->type !== null && $transaction->type !== $query->type) {
+            return false;
+        }
+
+        if ($query->status !== null && strcasecmp((string) $transaction->status, $query->status) !== 0) {
+            return false;
+        }
+
+        if ($query->bankAccountId !== null && $transaction->bankAccountId !== $query->bankAccountId) {
+            return false;
+        }
+
+        if ($query->from !== null && ($transaction->date === null || $transaction->date < $query->from)) {
+            return false;
+        }
+
+        if ($query->to !== null && ($transaction->date === null || $transaction->date > $query->to)) {
+            return false;
+        }
+
+        if ($query->modifiedSince !== null
+            && $transaction->updatedDateUtc !== null
+            && $transaction->updatedDateUtc < $query->modifiedSince) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * @throws Throwable when the fake has been told the next call fails
+     */
+    private function guardBankTransactions(): void
+    {
+        if ($this->nextBankTransactionFailure !== null) {
+            $failure = $this->nextBankTransactionFailure;
+            $this->nextBankTransactionFailure = null;
+            $this->nextRecodingFailure = null;
+
+            throw $failure;
+        }
+    }
+
+    /**
      * @throws Throwable when the fake has been told lookups are failing
      */
     private function guardLookups(): void
@@ -438,5 +666,9 @@ final class FakeConnector implements AccountingConnector
         $this->nextAttachmentResult = null;
         $this->contactIds = [];
         $this->unsupported = [];
+        $this->bankTransactions = [];
+        $this->bankTransactionQueries = [];
+        $this->recodings = [];
+        $this->nextBankTransactionFailure = null;
     }
 }

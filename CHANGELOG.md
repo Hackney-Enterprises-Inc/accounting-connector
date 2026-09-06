@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ReadsBankTransactions`, an optional interface carrying
+  `listBankTransactions(Connection, BankTransactionQuery): BankTransactionPage` and
+  `findBankTransaction(Connection, string): ?BankTransactionData`. Implemented by `XeroConnector`
+  over `GET /BankTransactions`, with the query's type, status, date range and bank account folded
+  into Xero's `where` expression and `modifiedSince` sent as an `If-Modified-Since` header in UTC
+  (Xero compares it against `UpdatedDateUTC`, so a host in a positive offset that sent local time
+  would ask for the future and get nothing back forever). A `304` is read as an empty page rather
+  than a failure, and a `404` on a single transaction returns null, because a host asking about a
+  transaction it mirrored last night is asking precisely because it may have been deleted.
+  Separate from `AccountingConnector` because it is genuinely optional: a host asks with
+  `instanceof` and falls back to posting.
+- `CodesBankTransactions`, carrying
+  `updateBankTransactionCoding(Connection, string, array<LineCoding>): BankTransactionData`. Xero
+  has no partial update - a POST replaces the transaction and a field left out is a field cleared
+  - so the implementation reads the transaction, lays the codings over its lines by `LineItemID`,
+  and posts the whole thing back with the amounts, date, contact, bank account, reference, status
+  and currency exactly as they came. Nothing about a reconciled transaction is pre-empted: Xero's
+  spec documents `IsReconciled` as a read flag and states no restriction on updating one, so the
+  call is made and a refusal surfaces as a `ValidationException` for the host to record.
+- `BankTransactionData`, `BankTransactionLine`, `BankTransactionQuery`, `BankTransactionPage`,
+  `LineCoding` and the `BankTransactionType` enum. Amounts are integer minor units like everything
+  else that crosses this boundary; `BankTransactionData::isCoded()` and `accountCodes()` answer
+  the one question a matcher has to ask before pushing its own coding over a bookkeeper's.
+  `BankTransactionLine` is deliberately not `LineItem`: a write payload refuses to exist without
+  an amount, and a read has to be able to represent a line the customer coded to nothing.
+- `FakeConnector` implements both new interfaces. `withBankTransactions(...)` stocks its books,
+  `failNextBankTransactionCall()` fails one call, `failNextRecoding()` fails only a coding change so a
+  host can exercise the branch where the read succeeds and the write is refused, and the recorded
+  `$bankTransactionQueries` and
+  `$recodings` arrays are public. Its filtering is real rather than a stub returning everything,
+  so a host test that asks for spend in a date window cannot pass against the fake and fail
+  against Xero. A recoding is kept, so a later `findBankTransaction()` answers with it and a
+  match-then-recode flow is testable end to end. `flush()` clears all of it.
+
 - `resolveContact(ContactData $contact, Connection $connection): string` is now part of the
   `AccountingConnector` interface. Both shipped connectors already had exactly this method, so
   nothing about their behaviour changes; what changes is that a host can resolve a vendor to its

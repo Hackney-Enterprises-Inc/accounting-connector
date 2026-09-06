@@ -1,0 +1,91 @@
+{
+    "Id": "0c1c0b6a-6b06-4b6f-9a8f-6a9d5a5f1c33",
+    "Status": "OK",
+    "ProviderName": "AccountingPipe",
+    "DateTimeUTC": "\/Date(1756400000000)\/",
+    "BankTransactions": [
+        {
+            "BankTransactionID": "spend-uuid-1",
+            "Type": "SPEND",
+            "Contact": {
+                "ContactID": "contact-uuid-1",
+                "Name": "Acme Supply"
+            },
+            "LineItems": [
+                {
+                    "LineItemID": "line-uuid-1",
+                    "Description": "Card purchase",
+                    "Quantity": 1.0,
+                    "UnitAmount": 42.5,
+                    "TaxType": "NONE",
+                    "TaxAmount": 0.0,
+                    "LineAmount": 42.5,
+                    "Tracking": []
+                }
+            ],
+            "BankAccount": {
+                "AccountID": "bank-uuid",
+                "Code": "090",
+                "Name": "Business Checking"
+            },
+            "IsReconciled": false,
+            "Date": "\/Date(1787875200000+0000)\/",
+            "Reference": "VISA 4242",
+            "CurrencyCode": "USD",
+            "CurrencyRate": 1.0,
+            "Status": "AUTHORISED",
+            "LineAmountTypes": "Exclusive",
+            "SubTotal": 42.5,
+            "TotalTax": 0.0,
+            "Total": 42.5,
+            "UpdatedDateUTC": "\/Date(1787918400000+0000)\/",
+            "HasAttachments": false
+        },
+        {
+            "BankTransactionID": "spend-uuid-2",
+            "Type": "SPEND",
+            "Contact": {
+                "ContactID": "contact-uuid-2",
+                "Name": "Northwind Fuel"
+            },
+            "LineItems": [
+                {
+                    "LineItemID": "line-uuid-2",
+                    "Description": "Fuel",
+                    "Quantity": 1.0,
+                    "UnitAmount": 80.0,
+                    "AccountCode": "429",
+                    "AccountID": "exp-uuid",
+                    "TaxType": "INPUT2",
+                    "TaxAmount": 12.0,
+                    "LineAmount": 80.0,
+                    "Tracking": [
+                        {
+                            "TrackingCategoryID": "cat-uuid",
+                            "TrackingOptionID": "opt-uuid",
+                            "Name": "Region",
+                            "Option": "North"
+                        }
+                    ]
+                }
+            ],
+            "BankAccount": {
+                "AccountID": "bank-uuid",
+                "Code": "090",
+                "Name": "Business Checking"
+            },
+            "IsReconciled": true,
+            "Date": "\/Date(1787702400000+0000)\/",
+            "Reference": "",
+            "CurrencyCode": "USD",
+            "CurrencyRate": 1.0,
+            "Status": "AUTHORISED",
+            "LineAmountTypes": "Exclusive",
+            "SubTotal": 80.0,
+            "TotalTax": 12.0,
+            "Total": 92.0,
+            "UpdatedDateUTC": "\/Date(1787745600000+0000)\/",
+            "HasAttachments": true
+        }
+    ]
+}

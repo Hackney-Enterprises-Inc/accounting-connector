@@ -4,18 +4,29 @@ declare(strict_types=1);
 
 namespace Hei\AccountingConnector\Connectors\Xero;
 
+use DateTimeImmutable;
+use DateTimeInterface;
+use DateTimeZone;
 use Hei\AccountingConnector\Connectors\AbstractConnector;
+use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
+use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
 use Hei\AccountingConnector\Data\AuthorizationResult;
+use Hei\AccountingConnector\Data\BankTransactionData;
+use Hei\AccountingConnector\Data\BankTransactionLine;
+use Hei\AccountingConnector\Data\BankTransactionPage;
+use Hei\AccountingConnector\Data\BankTransactionQuery;
 use Hei\AccountingConnector\Data\BillData;
 use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\ExpenseData;
 use Hei\AccountingConnector\Data\InvoiceData;
 use Hei\AccountingConnector\Data\JournalData;
+use Hei\AccountingConnector\Data\LineCoding;
+use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\PaymentData;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Data\TaxCode;
@@ -23,13 +34,16 @@ use Hei\AccountingConnector\Data\TenantInfo;
 use Hei\AccountingConnector\Data\TokenSet;
 use Hei\AccountingConnector\Data\TrackingCategory;
 use Hei\AccountingConnector\Data\TrackingOption;
+use Hei\AccountingConnector\Data\TrackingRef;
 use Hei\AccountingConnector\Enums\AccountClass;
+use Hei\AccountingConnector\Enums\BankTransactionType;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\AccountingConnectorException;
 use Hei\AccountingConnector\Exceptions\AuthenticationException;
 use Hei\AccountingConnector\Exceptions\ConnectionRevokedException;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
+use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\UnsupportedEntityTypeException;
 use Hei\AccountingConnector\Exceptions\ValidationException;
 use Hei\AccountingConnector\Http\HttpResponse;
@@ -50,7 +64,7 @@ use Hei\AccountingConnector\Support\Filename;
  * of ours. HttpClient honours Retry-After; the host still needs to keep its queue
  * concurrency modest.
  */
-final class XeroConnector extends AbstractConnector
+final class XeroConnector extends AbstractConnector implements CodesBankTransactions, ReadsBankTransactions
 {
     public const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 
@@ -908,6 +922,390 @@ final class XeroConnector extends AbstractConnector
         }
     }
 
+    /**
+     * One page of bank transactions, filtered at Xero rather than here.
+     *
+     * A company with a live bank feed holds tens of thousands of these and the
+     * per-tenant ceiling is sixty calls a minute shared with every other app the
+     * customer has connected, so everything the caller asked to narrow by becomes
+     * part of the `where` expression and the modified-since instant becomes a header.
+     */
+    public function listBankTransactions(Connection $connection, BankTransactionQuery $query): BankTransactionPage
+    {
+        $connection = $this->fresh($connection);
+
+        $parameters = ['page' => max(1, $query->page)];
+        $where = $this->bankTransactionWhere($query);
+
+        if ($where !== null) {
+            $parameters['where'] = $where;
+        }
+
+        $response = $this->get(
+            $connection,
+            'BankTransactions',
+            $parameters,
+            $this->modifiedSinceHeader($query->modifiedSince),
+        );
+
+        /*
+         * A 304 is the successful answer to "has anything changed", not a failure:
+         * Xero sends it when If-Modified-Since is newer than every candidate row.
+         */
+        if ($response->status === 304) {
+            return new BankTransactionPage([], $query->page);
+        }
+
+        if ($response->failed()) {
+            $this->raise($response, $connection, 'the bank transaction list');
+        }
+
+        $rows = $response->get('BankTransactions', []);
+        $transactions = [];
+
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            if (is_array($row)) {
+                $transactions[] = $this->bankTransaction($row);
+            }
+        }
+
+        return new BankTransactionPage($transactions, $query->page);
+    }
+
+    public function findBankTransaction(Connection $connection, string $externalId): ?BankTransactionData
+    {
+        $connection = $this->fresh($connection);
+
+        $response = $this->get($connection, 'BankTransactions/'.rawurlencode($externalId));
+
+        /*
+         * Xero answers a missing bank transaction with a 404, and a host asking about
+         * one it mirrored earlier is asking precisely because the row may be gone.
+         * That is an answer, not an error, so it comes back as null; every other
+         * failure still raises.
+         */
+        if ($response->status === 404) {
+            return null;
+        }
+
+        if ($response->failed()) {
+            $this->raise($response, $connection, "the bank transaction {$externalId}");
+        }
+
+        $row = $response->get('BankTransactions.0');
+
+        return is_array($row) ? $this->bankTransaction($row) : null;
+    }
+
+    /**
+     * Recode an existing bank transaction without disturbing anything else on it.
+     *
+     * Xero has no partial update: a POST to /BankTransactions replaces the whole
+     * transaction, and a field left out of the body is a field cleared. So this reads
+     * the transaction first and sends every part of it back - amounts, date, contact,
+     * bank account, reference, status - with only AccountCode and Tracking changed.
+     *
+     * Lines are addressed by LineItemID for the same reason. Omit it and Xero deletes
+     * the line it came from and creates a new one, which loses the reconciliation
+     * Xero holds against that line id.
+     *
+     * @param  array<int, LineCoding>  $codings
+     */
+    public function updateBankTransactionCoding(
+        Connection $connection,
+        string $externalId,
+        array $codings,
+    ): BankTransactionData {
+        $connection = $this->fresh($connection);
+
+        $current = $this->findBankTransaction($connection, $externalId);
+
+        if ($current === null) {
+            throw new NotFoundException(
+                "Xero has no bank transaction {$externalId} to recode.",
+                $this->provider(),
+            );
+        }
+
+        $response = $this->post($connection, 'BankTransactions', [
+            'BankTransactions' => [$this->recodedBody($current, $codings)],
+        ]);
+
+        if ($response->failed()) {
+            $this->raise($response, $connection, "recoding the bank transaction {$externalId}");
+        }
+
+        $row = $response->get('BankTransactions.0');
+
+        if (! is_array($row)) {
+            throw new ValidationException(
+                "Xero accepted the recoding of {$externalId} but returned no transaction.",
+                $this->provider(),
+            );
+        }
+
+        return $this->bankTransaction($row);
+    }
+
+    /**
+     * The full replacement body for a transaction whose coding is changing.
+     *
+     * @param  array<int, LineCoding>  $codings
+     * @return array<string, mixed>
+     */
+    private function recodedBody(BankTransactionData $current, array $codings): array
+    {
+        $body = [
+            'BankTransactionID' => $current->id,
+            'Type' => $current->type->value ?? BankTransactionType::Spend->value,
+            'LineItems' => array_map(
+                fn (BankTransactionLine $line): array => $this->recodedLine($line, $codings),
+                $current->lines,
+            ),
+        ];
+
+        if ($current->bankAccountId !== null) {
+            $body['BankAccount'] = ['AccountID' => $current->bankAccountId];
+        }
+
+        if ($current->contactId !== null) {
+            $body['Contact'] = ['ContactID' => $current->contactId];
+        }
+
+        if ($current->date !== null) {
+            $body['Date'] = XeroDate::toXero($current->date);
+        }
+
+        if ($current->reference !== null) {
+            $body['Reference'] = $current->reference;
+        }
+
+        if ($current->status !== null) {
+            $body['Status'] = $current->status;
+        }
+
+        if ($current->currency !== null) {
+            $body['CurrencyCode'] = $current->currency;
+        }
+
+        return $body;
+    }
+
+    /**
+     * One line, with the coding that applies to it laid over what is already there.
+     *
+     * @param  array<int, LineCoding>  $codings
+     * @return array<string, mixed>
+     */
+    private function recodedLine(BankTransactionLine $line, array $codings): array
+    {
+        $accountCode = $line->accountCode;
+        $tracking = $line->tracking;
+
+        foreach ($codings as $coding) {
+            if (! $coding->appliesTo($line->lineItemId)) {
+                continue;
+            }
+
+            if ($coding->accountCode !== null) {
+                $accountCode = $coding->accountCode;
+            }
+
+            if ($coding->tracking !== null) {
+                $tracking = $coding->tracking;
+            }
+        }
+
+        $body = [];
+
+        if ($line->lineItemId !== null) {
+            $body['LineItemID'] = $line->lineItemId;
+        }
+
+        if ($line->description !== null) {
+            $body['Description'] = $line->description;
+        }
+
+        /*
+         * Amounts go back exactly as they came. Xero recomputes LineAmount from
+         * Quantity times UnitAmount when both are present, so sending all three of a
+         * transaction it produced itself is the one way to be sure nothing moves.
+         */
+        if ($line->quantity !== null) {
+            $body['Quantity'] = $line->quantity;
+        }
+
+        if ($line->unitAmount !== null) {
+            $body['UnitAmount'] = $line->unitAmount->toDecimal();
+        }
+
+        if ($line->lineAmount !== null) {
+            $body['LineAmount'] = $line->lineAmount->toDecimal();
+        }
+
+        if ($line->taxType !== null) {
+            $body['TaxType'] = $line->taxType;
+        }
+
+        if ($accountCode !== null && $accountCode !== '') {
+            $body['AccountCode'] = $accountCode;
+        }
+
+        $body['Tracking'] = array_values(array_map(static fn (TrackingRef $ref): array => [
+            'TrackingCategoryID' => $ref->categoryId,
+            'TrackingOptionID' => $ref->optionId,
+        ], $tracking));
+
+        return $body;
+    }
+
+    /**
+     * Xero's `where` expression for a bank transaction query, or null for no filter.
+     *
+     * Dates are sent as DateTime(y,m,d) rather than quoted strings: Xero parses a
+     * quoted date in the connected company's own locale, so an unqualified "03/04"
+     * silently means March in one company and April in another.
+     */
+    private function bankTransactionWhere(BankTransactionQuery $query): ?string
+    {
+        $clauses = [];
+
+        if ($query->type !== null) {
+            $clauses[] = 'Type=="'.$query->type->value.'"';
+        }
+
+        if ($query->status !== null && $query->status !== '') {
+            $clauses[] = 'Status=="'.strtoupper($query->status).'"';
+        }
+
+        if ($query->from !== null) {
+            $clauses[] = 'Date>='.$this->whereDate($query->from);
+        }
+
+        if ($query->to !== null) {
+            $clauses[] = 'Date<='.$this->whereDate($query->to);
+        }
+
+        if ($query->bankAccountId !== null && $query->bankAccountId !== '') {
+            $clauses[] = 'BankAccount.AccountID==Guid("'.$query->bankAccountId.'")';
+        }
+
+        return $clauses === [] ? null : implode('&&', $clauses);
+    }
+
+    private function whereDate(DateTimeInterface $date): string
+    {
+        return 'DateTime('.$date->format('Y').','.$date->format('n').','.$date->format('j').')';
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function modifiedSinceHeader(?DateTimeImmutable $since): array
+    {
+        if ($since === null) {
+            return [];
+        }
+
+        // Xero compares this against UpdatedDateUTC, so it has to be sent in UTC or a
+        // host in a positive offset asks for the future and gets nothing back.
+        return ['If-Modified-Since' => XeroDate::toXeroDateTime(
+            $since->setTimezone(new DateTimeZone('UTC')),
+        )];
+    }
+
+    /**
+     * One BankTransaction from the wire.
+     *
+     * @param  array<string, mixed>  $row
+     */
+    private function bankTransaction(array $row): BankTransactionData
+    {
+        $contact = is_array($row['Contact'] ?? null) ? $row['Contact'] : [];
+        $bankAccount = is_array($row['BankAccount'] ?? null) ? $row['BankAccount'] : [];
+
+        $money = static fn (mixed $value): ?Money => is_numeric($value)
+            ? Money::fromDecimal((float) $value)
+            : null;
+
+        $lines = [];
+
+        foreach (is_array($row['LineItems'] ?? null) ? $row['LineItems'] : [] as $line) {
+            if (is_array($line)) {
+                $lines[] = $this->bankTransactionLine($line, $money);
+            }
+        }
+
+        $string = static fn (mixed $value): ?string => is_scalar($value) && (string) $value !== ''
+            ? (string) $value
+            : null;
+
+        return new BankTransactionData(
+            id: (string) ($row['BankTransactionID'] ?? ''),
+            type: BankTransactionType::tryFromXero($string($row['Type'] ?? null)),
+            date: XeroDate::parse($string($row['Date'] ?? null)),
+            total: $money($row['Total'] ?? null) ?? Money::zero(),
+            subTotal: $money($row['SubTotal'] ?? null),
+            totalTax: $money($row['TotalTax'] ?? null),
+            currency: $string($row['CurrencyCode'] ?? null),
+            status: $string($row['Status'] ?? null),
+            contactId: $string($contact['ContactID'] ?? null),
+            contactName: $string($contact['Name'] ?? null),
+            bankAccountId: $string($bankAccount['AccountID'] ?? null),
+            bankAccountName: $string($bankAccount['Name'] ?? null),
+            reference: $string($row['Reference'] ?? null),
+            isReconciled: (bool) ($row['IsReconciled'] ?? false),
+            hasAttachments: (bool) ($row['HasAttachments'] ?? false),
+            lines: $lines,
+            updatedDateUtc: XeroDate::parse($string($row['UpdatedDateUTC'] ?? null)),
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $line
+     * @param  callable(mixed): (Money|null)  $money
+     */
+    private function bankTransactionLine(array $line, callable $money): BankTransactionLine
+    {
+        $tracking = [];
+
+        foreach (is_array($line['Tracking'] ?? null) ? $line['Tracking'] : [] as $ref) {
+            if (! is_array($ref)) {
+                continue;
+            }
+
+            $categoryId = (string) ($ref['TrackingCategoryID'] ?? '');
+            $optionId = (string) ($ref['TrackingOptionID'] ?? '');
+
+            if ($categoryId === '' || $optionId === '') {
+                continue;
+            }
+
+            $tracking[] = new TrackingRef(
+                categoryId: $categoryId,
+                optionId: $optionId,
+                categoryName: isset($ref['Name']) ? (string) $ref['Name'] : null,
+                optionName: isset($ref['Option']) ? (string) $ref['Option'] : null,
+            );
+        }
+
+        $string = static fn (mixed $value): ?string => is_scalar($value) && (string) $value !== ''
+            ? (string) $value
+            : null;
+
+        return new BankTransactionLine(
+            lineItemId: $string($line['LineItemID'] ?? null),
+            description: $string($line['Description'] ?? null),
+            quantity: isset($line['Quantity']) && is_numeric($line['Quantity']) ? (float) $line['Quantity'] : null,
+            unitAmount: $money($line['UnitAmount'] ?? null),
+            lineAmount: $money($line['LineAmount'] ?? null),
+            accountCode: $string($line['AccountCode'] ?? null),
+            accountId: $string($line['AccountID'] ?? null),
+            taxType: $string($line['TaxType'] ?? null),
+            tracking: $tracking,
+        );
+    }
+
     private function mapper(): XeroPayloadMapper
     {
         // Lazily built so the constructor signature stays inherited and callers do
@@ -917,8 +1315,9 @@ final class XeroConnector extends AbstractConnector
 
     /**
      * @param  array<string, mixed>  $query
+     * @param  array<string, string>  $headers  Merged over the standard set.
      */
-    private function get(Connection $connection, string $resource, array $query = []): HttpResponse
+    private function get(Connection $connection, string $resource, array $query = [], array $headers = []): HttpResponse
     {
         $url = self::API_BASE.'/'.$resource;
 
@@ -926,7 +1325,7 @@ final class XeroConnector extends AbstractConnector
             $url .= '?'.http_build_query($query);
         }
 
-        return $this->http->send('GET', $url, $this->headers($connection), null, $this->provider());
+        return $this->http->send('GET', $url, $headers + $this->headers($connection), null, $this->provider());
     }
 
     /**
