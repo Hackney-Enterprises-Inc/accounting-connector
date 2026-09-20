@@ -144,6 +144,49 @@ final readonly class BankTransactionData
     }
 
     /**
+     * This transaction with its lines' account codes replaced and, when given, its
+     * modification stamp: the state a decision was made against, rebuilt from the
+     * connector's later read and the expectation. Amounts are the read's own; a
+     * recode never moves them, so they are the same on both sides.
+     *
+     * @param  array<string, string|null>  $accountCodesByLine  Line id (or `#index`) to account code.
+     */
+    public function withAccountCodes(array $accountCodesByLine, ?DateTimeImmutable $updatedDateUtc = null): self
+    {
+        $lines = [];
+
+        foreach ($this->lines as $index => $line) {
+            $key = $line->lineItemId ?? '#'.$index;
+
+            $lines[] = array_key_exists($key, $accountCodesByLine)
+                ? $line->withAccountCode($accountCodesByLine[$key])
+                : $line;
+        }
+
+        return new self(
+            id: $this->id,
+            type: $this->type,
+            date: $this->date,
+            total: $this->total,
+            subTotal: $this->subTotal,
+            totalTax: $this->totalTax,
+            currency: $this->currency,
+            status: $this->status,
+            contactId: $this->contactId,
+            contactName: $this->contactName,
+            bankAccountId: $this->bankAccountId,
+            bankAccountName: $this->bankAccountName,
+            reference: $this->reference,
+            isReconciled: $this->isReconciled,
+            hasAttachments: $this->hasAttachments,
+            lines: $lines,
+            updatedDateUtc: $updatedDateUtc ?? $this->updatedDateUtc,
+            lineAmountType: $this->lineAmountType,
+            currencyRate: $this->currencyRate,
+        );
+    }
+
+    /**
      * @param  array<string, mixed>  $data
      */
     public static function fromArray(array $data): self

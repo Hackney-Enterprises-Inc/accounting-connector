@@ -12,6 +12,7 @@ use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\ValidationException;
 use Hei\AccountingConnector\Http\HttpClient;
+use Hei\AccountingConnector\Http\HttpResponse;
 use Hei\AccountingConnector\Http\NullSleeper;
 use Hei\AccountingConnector\Http\RequestGate;
 use Http\Discovery\Psr17FactoryDiscovery;
@@ -221,6 +222,8 @@ it('tells the request gate which tenant every bank transaction call spends', fun
         {
             $this->seen[] = ($provider?->value ?? '-').':'.($tenantId ?? '-');
         }
+
+        public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void {}
 
         public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void {}
     };

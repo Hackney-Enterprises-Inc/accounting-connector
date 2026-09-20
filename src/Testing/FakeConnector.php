@@ -686,6 +686,18 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         if ($expectation !== null) {
             $differences = $expectation->differences($current);
 
+            // As the real connector: a read that already shows the change applied
+            // is an earlier attempt whose response was lost, not a stale decision.
+            if ($differences !== [] && $change->isSatisfiedBy($current)
+                && $change->codesAfter($expectation->accountCodesByLine) === $current->accountCodesByLine()
+                && ! ($expectation->updatedDateUtc !== null && $current->updatedDateUtc !== null && $current->updatedDateUtc < $expectation->updatedDateUtc)) {
+                return new RecodeResult(
+                    $current->withAccountCodes($expectation->accountCodesByLine, $expectation->updatedDateUtc),
+                    $current,
+                    recovered: true,
+                );
+            }
+
             if ($differences !== []) {
                 throw new PreconditionFailedException(
                     sprintf(
@@ -1024,5 +1036,6 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         $this->mutateBeforeNextRecode = null;
         $this->nextBankTransactionFailure = null;
         $this->nextRecodingFailure = null;
+        $this->afterNextBankTransactionList = null;
     }
 }

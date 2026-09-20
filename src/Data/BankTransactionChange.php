@@ -46,6 +46,76 @@ final readonly class BankTransactionChange
     }
 
     /**
+     * The account codes a transaction carries once this change has been applied
+     * to the codes it carried before, line by line.
+     *
+     * @param  array<string, string|null>  $before  Line id (or `#index`) to account code.
+     * @return array<string, string|null>
+     */
+    public function codesAfter(array $before): array
+    {
+        $after = $before;
+
+        foreach ($before as $line => $code) {
+            // An `#index` key is a line with no id, which only an all-lines coding reaches.
+            $lineId = str_starts_with((string) $line, '#') ? null : (string) $line;
+
+            foreach ($this->codings as $coding) {
+                if ($coding->appliesTo($lineId) && $coding->accountCode !== null) {
+                    $after[$line] = $coding->accountCode;
+                }
+            }
+        }
+
+        return $after;
+    }
+
+    /**
+     * Whether a transaction already carries everything this change would set:
+     * every targeted line's account code and tracking, and the contact when one is
+     * named. What the change does not touch is not looked at here.
+     */
+    public function isSatisfiedBy(BankTransactionData $transaction): bool
+    {
+        if ($this->contactId !== null && $this->contactId !== '' && $transaction->contactId !== $this->contactId) {
+            return false;
+        }
+
+        foreach ($transaction->lines as $line) {
+            foreach ($this->codings as $coding) {
+                if (! $coding->appliesTo($line->lineItemId)) {
+                    continue;
+                }
+
+                if ($coding->accountCode !== null && $line->accountCode !== $coding->accountCode) {
+                    return false;
+                }
+
+                if ($coding->tracking !== null && ! self::sameTracking($line->tracking, $coding->tracking)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param  array<int, TrackingRef>  $a
+     * @param  array<int, TrackingRef>  $b
+     */
+    private static function sameTracking(array $a, array $b): bool
+    {
+        $key = static fn (TrackingRef $ref): string => $ref->categoryId.'|'.$ref->optionId;
+        $left = array_map($key, $a);
+        $right = array_map($key, $b);
+        sort($left);
+        sort($right);
+
+        return $left === $right;
+    }
+
+    /**
      * Whether this would change anything at all.
      *
      * A change that changes nothing is refused before any request is made: a POST

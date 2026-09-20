@@ -27,12 +27,15 @@ use Throwable;
  * host may call the client for something that is not a provider at all; an
  * implementation keys such calls however it likes.
  *
- * Every attempt the gate let through ends in one of two ways: a response, which
- * the client hands to its {@see HttpClient::afterResponse()} listeners, or a
- * transport failure (a timeout, a reset, a DNS miss) with no response at all. The
- * second is {@see release()}: whatever the gate reserved for the attempt (an
- * in-flight slot, most likely) is handed back, so four timeouts in a row cannot
- * leave a tenant looking as though four requests were still in flight.
+ * Every attempt the gate let through ends in one of two ways, and the gate hears
+ * about both from the client itself, without the host wiring anything else: a
+ * response, successful or not, 429s and 5xx the client is about to retry
+ * included, goes to {@see observe()}; a transport failure (a timeout, a reset, a
+ * DNS miss) with no response at all goes to {@see release()}. Either way whatever
+ * the gate reserved for the attempt (an in-flight slot, most likely) is handed
+ * back, so four timeouts in a row cannot leave a tenant looking as though four
+ * requests were still in flight, and a host that bound a gate but registered no
+ * {@see HttpClient::afterResponse()} listener does not leak a slot per success.
  */
 interface RequestGate
 {
@@ -40,6 +43,15 @@ interface RequestGate
      * @throws RateLimitException to refuse the attempt outright
      */
     public function acquire(?Provider $provider, ?string $tenantId): void;
+
+    /**
+     * An attempt the gate admitted came back with a response.
+     *
+     * Called before the client's own listeners, for every response received,
+     * including a 429 or a 5xx it is about to retry. Must not throw; a gate that
+     * does is logged and ignored, since bookkeeping must never fail a request.
+     */
+    public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void;
 
     /**
      * An attempt the gate admitted produced no response.

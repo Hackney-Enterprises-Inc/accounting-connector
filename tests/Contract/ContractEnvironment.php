@@ -163,7 +163,7 @@ final class ContractEnvironment
     {
         $decoded = json_decode((string) file_get_contents($this->tokenFile()), true);
 
-        if (! is_array($decoded) || empty($decoded['access_token'])) {
+        if (! is_array($decoded) || empty($decoded['access_token']) || empty($decoded['refresh_token'])) {
             throw new RuntimeException(sprintf(
                 'The token file %s must hold a JSON object with at least access_token and refresh_token.',
                 $this->tokenFile(),

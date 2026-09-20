@@ -324,3 +324,34 @@ it('runs a callback once after the next list, so the books can change between tw
         ->and(idsOf($fake, new BankTransactionQuery))->toBe(['one', 'two'])
         ->and($seen)->toBe(1);
 });
+
+it('forgets a queued after-list callback on flush like every other one-shot hook', function () {
+    $fake = (new FakeConnector)->withBankTransactions(fakeTransaction('one', '2026-09-01'));
+    $ran = false;
+    $fake->afterNextBankTransactionCall(function () use (&$ran): void {
+        $ran = true;
+    });
+
+    $fake->flush();
+    $fake->withBankTransactions(fakeTransaction('two', '2026-09-02'));
+    idsOf($fake, new BankTransactionQuery);
+
+    expect($ran)->toBeFalse();
+});
+
+it('treats a retry whose read already carries the change as landed, like the real connector', function () {
+    $fake = (new FakeConnector)->withBankTransactions(codedTransaction('one', '250'));
+    $before = $fake->listBankTransactions(connection(), new BankTransactionQuery)->transactions[0];
+
+    // The first write lands; imagine its response was lost.
+    $fake->recodeBankTransaction(connection(), 'one', BankTransactionChange::allLines('429'), RecodeExpectation::from($before), 'op-1');
+    $writes = count($fake->changes);
+
+    // The retry: same expectation, same key. No second write, the read is the result.
+    $result = $fake->recodeBankTransaction(connection(), 'one', BankTransactionChange::allLines('429'), RecodeExpectation::from($before), 'op-1');
+
+    expect($result->recovered)->toBeTrue()
+        ->and(count($fake->changes))->toBe($writes)
+        ->and($result->after->accountCodes())->toBe(['429'])
+        ->and($result->before->accountCodesByLine())->toBe($before->accountCodesByLine());
+});

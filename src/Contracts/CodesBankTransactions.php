@@ -89,6 +89,7 @@ interface CodesBankTransactions
      * @throws NotFoundException when the transaction no longer exists
      * @throws ValidationException when the connector or the provider refuses the change
      * @throws RecodeMovedMoneyException when the provider accepted the change and moved an amount
+     * @throws InvalidPayloadException when the codings would change nothing: none given, or none carrying an account code or tracking
      * @throws ConnectionRevokedException when the connection is dead
      */
     public function updateBankTransactionCoding(

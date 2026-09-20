@@ -69,6 +69,18 @@ final class RecodeInvariants
             if ($line->quantity !== null && $other->quantity !== null && abs($line->quantity - $other->quantity) > 0.000001) {
                 $moved[] = sprintf('line %s Quantity %s became %s', $id, $line->quantity, $other->quantity);
             }
+
+            // Tax and the exact unit price too: two lines whose taxes went from
+            // 4.99 and 5.01 to 5.00 and 5.00 leave every header figure where it
+            // was, and a unit price re-rounded by the provider is a different line
+            // even when the line amount it was multiplied into happens to agree.
+            if ($line->taxAmount !== null && $other->taxAmount !== null && $line->taxAmount->amount !== $other->taxAmount->amount) {
+                $moved[] = self::describe("line {$id} TaxAmount", $line->taxAmount->amount, $other->taxAmount->amount);
+            }
+
+            if (self::unitAmountMoved($line, $other)) {
+                $moved[] = sprintf('line %s UnitAmount %s became %s', $id, self::unitAmountOf($line), self::unitAmountOf($other));
+            }
         }
 
         foreach (array_diff_key($afterLines, $beforeLines) as $id => $line) {
@@ -76,6 +88,33 @@ final class RecodeInvariants
         }
 
         return $moved;
+    }
+
+    /**
+     * Whether the unit price differs between two copies of a line.
+     *
+     * Compared at the exact (four-place) figure when both sides carry one, so a
+     * 1.3333 that came back 1.33 is caught; at the cents figure when either side
+     * has no exact one, so nothing is invented.
+     */
+    private static function unitAmountMoved(BankTransactionLine $before, BankTransactionLine $after): bool
+    {
+        if ($before->unitAmountExact !== null && $after->unitAmountExact !== null
+            && is_numeric($before->unitAmountExact) && is_numeric($after->unitAmountExact)) {
+            return abs((float) $before->unitAmountExact - (float) $after->unitAmountExact) > 0.00005;
+        }
+
+        return $before->unitAmount !== null && $after->unitAmount !== null
+            && $before->unitAmount->amount !== $after->unitAmount->amount;
+    }
+
+    private static function unitAmountOf(BankTransactionLine $line): string
+    {
+        if ($line->unitAmountExact !== null && is_numeric($line->unitAmountExact)) {
+            return (string) $line->unitAmountExact;
+        }
+
+        return $line->unitAmount === null ? '-' : number_format($line->unitAmount->amount / 100, 2, '.', '');
     }
 
     /**

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Hei\AccountingConnector\Contracts\AccountingConnector;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Enums\AccountClass;
@@ -68,15 +69,33 @@ it('writes a fetched list into the durable store', function () {
 
     xeroWithStore($fake, $store)->chartOfAccounts(connection());
 
-    expect($store->writes)->toBe(['chart_of_accounts'])
-        ->and($store->get(connection(), 'chart_of_accounts'))->toHaveCount(3);
+    expect($store->writes)->toBe([AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS])
+        ->and($store->get(connection(), AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS))->toHaveCount(3);
+});
+
+it('reads the chart under a versioned key so rows stored before system_account existed are bypassed', function () {
+    // A row under the old key, as a host that upgraded from an earlier release
+    // still holds: no system_account on any account. It must not be served.
+    $store = new ArrayLookupStore;
+    $store->seed(connection(), 'chart_of_accounts', [
+        ['id' => 'stale', 'name' => 'Stale Bank Fees', 'code' => '404', 'class' => 'expense'],
+    ]);
+    $fake = fakeHttp();
+    $fake->queue(200, accountsPayload());
+
+    $accounts = xeroWithStore($fake, $store)->chartOfAccounts(connection());
+
+    expect(AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS)->not->toBe('chart_of_accounts')
+        ->and(count($fake->requests))->toBe(1)
+        ->and(array_map(fn (Account $a): string => $a->id, $accounts))->not->toContain('stale')
+        ->and($store->get(connection(), 'chart_of_accounts'))->toHaveCount(1);
 });
 
 it('serves a stored list without calling the provider when the cache is cold', function () {
     // The deploy case: cache flushed, but the stored list survives, so a settings
     // page load does not send every organization back to Xero.
     $store = new ArrayLookupStore;
-    $store->seed(connection(), 'chart_of_accounts', [
+    $store->seed(connection(), AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS, [
         ['id' => 'exp-uuid', 'name' => 'General Expenses', 'code' => '400', 'type' => 'EXPENSE', 'class' => 'expense'],
     ]);
 
@@ -94,7 +113,7 @@ it('serves a stale list when the provider is unreachable', function () {
     // A Xero outage should leave a settings page slightly stale, not empty. An empty
     // account dropdown reads to a customer as "my chart of accounts is gone".
     $store = new ArrayLookupStore;
-    $store->seed(connection(), 'chart_of_accounts', [
+    $store->seed(connection(), AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS, [
         ['id' => 'exp-uuid', 'name' => 'General Expenses', 'code' => '400', 'type' => 'EXPENSE', 'class' => 'expense'],
     ]);
 
@@ -119,7 +138,7 @@ it('propagates the error when the provider fails and nothing was ever stored', f
 
 it('goes back to the provider when a refresh is forced', function () {
     $store = new ArrayLookupStore;
-    $store->seed(connection(), 'chart_of_accounts', [
+    $store->seed(connection(), AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS, [
         ['id' => 'old', 'name' => 'Stale Account', 'class' => 'expense'],
     ]);
 
@@ -134,7 +153,7 @@ it('goes back to the provider when a refresh is forced', function () {
 
 it('scopes stored lookups per tenant', function () {
     $store = new ArrayLookupStore;
-    $store->seed(connection(), 'chart_of_accounts', [['id' => 'a', 'name' => 'Tenant A account']]);
+    $store->seed(connection(), AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS, [['id' => 'a', 'name' => 'Tenant A account']]);
 
     $other = new Connection(
         Provider::Xero,
@@ -143,7 +162,7 @@ it('scopes stored lookups per tenant', function () {
         expiresAt: (new DateTimeImmutable)->modify('+30 minutes'),
     );
 
-    expect($store->get($other, 'chart_of_accounts'))->toBeNull();
+    expect($store->get($other, AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS))->toBeNull();
 });
 
 it('reads tax rates with their portable sales and purchase flags', function () {

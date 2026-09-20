@@ -84,6 +84,15 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
     public const API_BASE = 'https://api.xero.com/api.xro/2.0';
 
     /**
+     * The query every bank transaction read AND write carries. Xero rounds unit
+     * amounts to two places unless asked for four, on the way out and on the way
+     * in, and a price rounded to cents times a quantity is a different line.
+     *
+     * @var array<string, int>
+     */
+    private const UNIT_DP = ['unitdp' => 4];
+
+    /**
      * Xero caps an attachment at 10 MB, and rejects anything larger outright.
      *
      * This is the number that makes AttachmentSet worth having: an email rendered to
@@ -286,7 +295,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
         // customer shares with every other app they have connected.
         return $this->lookup(
             $connection,
-            'chart_of_accounts',
+            self::LOOKUP_CHART_OF_ACCOUNTS,
             $forceRefresh,
             fn (): array => $this->fetchAccounts($connection),
             fn (array $row): Account => Account::fromArray($row),
@@ -980,8 +989,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
         $parameters = [
             'page' => $query->page,
             'pageSize' => $pageSize,
-            'unitdp' => 4,
-        ];
+        ] + self::UNIT_DP;
 
         if ($query->order !== null) {
             $parameters['order'] = $query->order;
@@ -1036,7 +1044,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
     {
         $connection = $this->fresh($connection);
 
-        $response = $this->get($connection, 'BankTransactions/'.rawurlencode($externalId), ['unitdp' => 4]);
+        $response = $this->get($connection, 'BankTransactions/'.rawurlencode($externalId), self::UNIT_DP);
 
         /*
          * Xero answers a missing bank transaction with a 404, and a host asking about
@@ -1098,6 +1106,24 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
         if ($expectation !== null) {
             $differences = $expectation->differences($current);
 
+            /*
+             * The read may already show the change applied: an earlier attempt
+             * landed and its response was lost, and this is the retry the
+             * idempotency key exists for. Judged strictly: every line the change
+             * targets carries what the change sets, every other line still carries
+             * what the expectation says, and the provider's stamp has moved on, not
+             * back. Then nothing is sent and the read is the result. A person who
+             * coded the line to the very same account in between is indistinguishable
+             * from that and is treated the same way.
+             */
+            if ($differences !== [] && $this->alreadyLanded($expectation, $change, $current)) {
+                return new RecodeResult(
+                    $current->withAccountCodes($expectation->accountCodesByLine, $expectation->updatedDateUtc),
+                    $current,
+                    recovered: true,
+                );
+            }
+
             if ($differences !== []) {
                 throw new PreconditionFailedException(
                     sprintf(
@@ -1114,9 +1140,14 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
         $this->refuseWhenTaxWouldMove($connection, $current);
 
+        // unitdp=4 on the write as on the reads: without it Xero rounds the
+        // UnitAmount it is handed to two places before recomputing the line, so a
+        // 1.3333 read back at four places lands as 1.33 and a three-unit line moves
+        // by a cent (invariant 15). The row Xero answers with comes back at four
+        // places too, which is what the moved-money check compares.
         $response = $this->post($connection, 'BankTransactions', [
             'BankTransactions' => [$this->recodedBody($current, $change)],
-        ], $idempotencyKey);
+        ], $idempotencyKey, self::UNIT_DP);
 
         if ($response->failed()) {
             $this->raise($response, $connection, "recoding the bank transaction {$externalId}");
@@ -1189,6 +1220,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             'BankTransactions/'.rawurlencode($externalId),
             ['BankTransactions' => [['BankTransactionID' => $externalId, 'Status' => 'DELETED']]],
             $idempotencyKey,
+            self::UNIT_DP,
         );
 
         if ($response->status === 404) {
@@ -1351,14 +1383,47 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
             $rate = $rates[$line->taxType];
 
+            /*
+             * What Xero will compute on the write, in whole cents. Exact: a stored
+             * tax a cent away from the recomputation is exactly the case a write
+             * would "correct", moving the total by that cent, and the moved-money
+             * check afterwards would only report what had already landed. A line
+             * whose stored tax sits on a half-cent Xero rounded the other way is
+             * refused with it, which is the safe side; the contract suite is the
+             * place to pin Xero's rounding rule if that ever bites.
+             */
             $expected = $current->lineAmountType === LineAmountType::Inclusive
                 ? (int) round($lineAmount * $rate / (100 + $rate))
                 : (int) round($lineAmount * $rate / 100);
 
-            if (abs($expected - $tax) > 1) {
+            if ($expected !== $tax) {
                 $this->refuseTaxOverride($current, $line, $index, $expected, $tax);
             }
         }
+    }
+
+    /**
+     * Whether a fresh read is exactly the state the change would have produced
+     * from the expected one: an earlier write that landed.
+     */
+    private function alreadyLanded(RecodeExpectation $expectation, BankTransactionChange $change, BankTransactionData $current): bool
+    {
+        if (! $change->isSatisfiedBy($current)) {
+            return false;
+        }
+
+        if ($change->codesAfter($expectation->accountCodesByLine) !== $current->accountCodesByLine()) {
+            return false;
+        }
+
+        // The stamp must not have gone backwards; equal or missing is fine (a
+        // provider or a fixture that omits it cannot be held to it).
+        if ($expectation->updatedDateUtc !== null && $current->updatedDateUtc !== null
+            && $current->updatedDateUtc < $expectation->updatedDateUtc) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -1808,8 +1873,9 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
     /**
      * @param  array<string, mixed>  $body
+     * @param  array<string, mixed>  $query
      */
-    private function post(Connection $connection, string $resource, array $body, ?string $idempotencyKey = null): HttpResponse
+    private function post(Connection $connection, string $resource, array $body, ?string $idempotencyKey = null, array $query = []): HttpResponse
     {
         $headers = $this->headers($connection) + ['Content-Type' => 'application/json'];
 
@@ -1817,9 +1883,15 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             $headers['Idempotency-Key'] = $idempotencyKey;
         }
 
+        $url = self::API_BASE.'/'.$resource;
+
+        if ($query !== []) {
+            $url .= '?'.http_build_query($query);
+        }
+
         return $this->http->send(
             'POST',
-            self::API_BASE.'/'.$resource,
+            $url,
             $headers,
             json_encode($body, JSON_THROW_ON_ERROR),
             $this->provider(),

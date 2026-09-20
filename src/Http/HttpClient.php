@@ -270,6 +270,18 @@ final class HttpClient
      */
     private function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void
     {
+        // The gate first: it admitted the attempt and is the one thing that must
+        // hear how it ended, listener or no listener.
+        try {
+            $this->gate->observe($response, $provider, $tenantId);
+        } catch (Throwable $e) {
+            $this->logger->warning('A request gate threw while observing a response; ignoring it.', [
+                'provider' => $provider?->value,
+                'tenant' => $tenantId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
         foreach ($this->afterResponse as $listener) {
             try {
                 $listener($response, $provider, $tenantId);

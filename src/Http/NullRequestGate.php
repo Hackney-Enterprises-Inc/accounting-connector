@@ -21,6 +21,11 @@ final class NullRequestGate implements RequestGate
         // Nothing to spend, nothing to wait for.
     }
 
+    public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void
+    {
+        // Nothing to account for.
+    }
+
     public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void
     {
         // Nothing was reserved.

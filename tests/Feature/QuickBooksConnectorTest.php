@@ -139,6 +139,26 @@ it('refuses a money-in expense rather than posting a refund as a purchase', func
     expect($fake->requests)->toBeEmpty();
 });
 
+it('refuses a money-in expense on an update as it does on a create', function () {
+    // The update path builds the same Purchase; it must refuse the same payload
+    // before reading the SyncToken or sending anything.
+    $fake = fakeHttp();
+
+    $refund = new ExpenseData(
+        vendor: 'Corner Store',
+        date: new DateTimeImmutable('2026-08-21'),
+        lines: [new LineItem('Refund', unitAmount: Money::cents(1250), accountCode: '63')],
+        bankAccount: '35',
+        paymentMethod: 'CreditCard',
+        direction: MoneyDirection::In,
+    );
+
+    expect(fn () => qbo($fake)->updateEntity(EntityType::Expense, '101', $refund, qboConnection()))
+        ->toThrow(InvalidPayloadException::class, 'money-in');
+
+    expect($fake->requests)->toBeEmpty();
+});
+
 it('sends the tax mode as GlobalTaxCalculation on every document', function () {
     // Required on non-US companies, ignored by US ones. Omitting it made Intuit
     // treat tax-inclusive amounts as exclusive and post totals off by the tax.

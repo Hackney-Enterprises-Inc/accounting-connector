@@ -117,18 +117,37 @@ it('refuses a line whose tax was adjusted by hand, because Xero would recompute 
     expect(methodsOf($fake))->toBe(['GET', 'GET']);
 });
 
-it('tolerates a cent of rounding on the tax and proves the rate from the lookup', function () {
-    // 33.33 exclusive at 15 percent is 4.9995: Xero rounds to 5.00 and so do we,
-    // and a cent either way is rounding rather than a decision.
+it('proves the tax from the rate lookup and lets a line whose tax is exactly what the rate gives through', function () {
+    // 33.33 exclusive at 15 percent is 4.9995, which Xero and we both round to
+    // 5.00: stored as 5.00 the line is untouched and the recode goes out.
     $fake = fakeHttp();
-    $fake->queue(200, transactionResponse('spend-uuid-2', ['SubTotal' => 33.33, 'TotalTax' => 4.99, 'Total' => 38.32], [['UnitAmount' => 33.33, 'LineAmount' => 33.33, 'TaxAmount' => 4.99]]));
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['SubTotal' => 33.33, 'TotalTax' => 5.00, 'Total' => 38.33], [['UnitAmount' => 33.33, 'LineAmount' => 33.33, 'TaxAmount' => 5.00]]));
     $fake->queue(200, providerResponse('xero/tax-rates'));
-    $fake->queue(200, transactionResponse('spend-uuid-2', ['SubTotal' => 33.33, 'TotalTax' => 4.99, 'Total' => 38.32], [['UnitAmount' => 33.33, 'LineAmount' => 33.33, 'TaxAmount' => 4.99, 'AccountCode' => '400']]));
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['SubTotal' => 33.33, 'TotalTax' => 5.00, 'Total' => 38.33], [['UnitAmount' => 33.33, 'LineAmount' => 33.33, 'TaxAmount' => 5.00, 'AccountCode' => '400']]));
 
     $result = xeroReader($fake)->recodeBankTransaction(connection(), 'spend-uuid-2', BankTransactionChange::allLines('400'));
 
     expect($result->after->accountCodes())->toBe(['400'])
         ->and(methodsOf($fake))->toBe(['GET', 'GET', 'POST']);
+});
+
+it('refuses a line whose stored tax is a cent off what the rate gives, before any write (invariant 15)', function () {
+    // Stored 4.99 where 15 percent of 33.33 rounds to 5.00: a write would
+    // "correct" the tax and move the total by that cent. A cent is not slack.
+    $fake = fakeHttp();
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['SubTotal' => 33.33, 'TotalTax' => 4.99, 'Total' => 38.32], [['UnitAmount' => 33.33, 'LineAmount' => 33.33, 'TaxAmount' => 4.99]]));
+    $fake->queue(200, providerResponse('xero/tax-rates'));
+
+    try {
+        xeroReader($fake)->recodeBankTransaction(connection(), 'spend-uuid-2', BankTransactionChange::allLines('400'));
+        $this->fail('a cent of tax difference must be refused');
+    } catch (ValidationException $e) {
+        expect($e->reason)->toBe(ValidationException::REASON_TAX_OVERRIDE_WOULD_BE_LOST)
+            ->and($e->getMessage())->toContain('4.99')
+            ->and($e->getMessage())->toContain('5.00');
+    }
+
+    expect(methodsOf($fake))->toBe(['GET', 'GET']);
 });
 
 it('proves a line taxed with an archived rate from the archived lookup, made only when needed', function () {
@@ -249,6 +268,10 @@ it('sends a four-place unit price back as it came, not rounded to cents', functi
     $line = $fake->requestBody(1)['BankTransactions'][0]['LineItems'][0];
 
     expect(queryOf($fake, 0)['unitdp'])->toBe('4')
+        // The write asks for four places too: Xero rounds a UnitAmount it is
+        // handed to two places unless told otherwise, and 1.33 x 3 is 3.99.
+        ->and($fake->requests[1]->getMethod())->toBe('POST')
+        ->and(queryOf($fake, 1)['unitdp'])->toBe('4')
         ->and($line['UnitAmount'])->toEqual(1.3333)
         ->and($line['Quantity'])->toEqual(3.0)
         ->and($line['LineAmount'])->toEqual(4.0)
@@ -289,6 +312,41 @@ it('raises when the provider accepted the recode and moved the money anyway', fu
         });
 });
 
+it('raises when the provider moved tax between lines or re-rounded a unit price with the headers unchanged', function () {
+    // The reviewer's case: line taxes 4.99 and 5.01 come back 5.00 and 5.00. Every
+    // header figure is where it was and yet each line's tax moved; likewise a
+    // 1.3333 unit price re-rounded to 1.33 on a line whose amount still reads 4.00.
+    $two = static fn (array $taxes, string $unitB): array => ['BankTransactions' => [[
+        'BankTransactionID' => 'spend-uuid-9',
+        'Type' => 'SPEND',
+        'Status' => 'AUTHORISED',
+        'LineAmountTypes' => 'Exclusive',
+        'SubTotal' => 66.66,
+        'TotalTax' => 10.0,
+        'Total' => 76.66,
+        'CurrencyCode' => 'USD',
+        'UpdatedDateUTC' => '/Date(1787702400000+0000)/',
+        'BankAccount' => ['AccountID' => 'bank-uuid'],
+        'LineItems' => [
+            ['LineItemID' => 'line-a', 'Quantity' => 1.0, 'UnitAmount' => 33.33, 'LineAmount' => 33.33, 'AccountCode' => '400', 'TaxType' => 'INPUT2', 'TaxAmount' => $taxes[0]],
+            ['LineItemID' => 'line-b', 'Quantity' => 1.0, 'UnitAmount' => $unitB, 'LineAmount' => 33.33, 'AccountCode' => '400', 'TaxType' => 'INPUT2', 'TaxAmount' => $taxes[1]],
+        ],
+    ]]];
+
+    $fake = fakeHttp();
+    $fake->queue(200, $two([5.0, 5.0], '33.3333'));
+    $fake->queue(200, providerResponse('xero/tax-rates'));
+    $fake->queue(200, $two([4.99, 5.01], '33.33'));
+
+    expect(fn () => xeroReader($fake)->recodeBankTransaction(connection(), 'spend-uuid-9', BankTransactionChange::allLines('429')))
+        ->toThrow(function (RecodeMovedMoneyException $e): void {
+            expect($e->differences)->toContain('line line-a TaxAmount 5.00 became 4.99')
+                ->and($e->differences)->toContain('line line-b TaxAmount 5.00 became 5.01')
+                ->and($e->differences)->toContain('line line-b UnitAmount 33.3333 became 33.33')
+                ->and(implode(' ', $e->differences))->not->toContain('Total ');
+        });
+});
+
 it('refuses a stale expectation on its own read, with no write', function () {
     // The host decided against a line coded 429 and modified at one instant; the
     // connector's read finds it coded 400. Somebody was there in between.
@@ -309,6 +367,52 @@ it('refuses a stale expectation on its own read, with no write', function () {
             ->and($e->differences)->toContain('line line-uuid-2 is coded to 400, not 429')
             ->and($e->differences[1])->toStartWith('modified at');
     });
+
+    expect(methodsOf($fake))->toBe(['GET']);
+});
+
+it('treats a retry whose read already shows the change applied as landed, without a second write', function () {
+    // The write landed and its response was lost. The retry carries the same
+    // expectation and key; its own read shows the intended coding and a later
+    // stamp. That is not a stale decision: nothing is sent, the read is the
+    // result, and the before-state is the expectation laid over the read.
+    $decidedAgainst = xeroReaderRead(transactionResponse('spend-uuid-2'));
+
+    $fake = fakeHttp();
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['UpdatedDateUTC' => '/Date(1787745700000+0000)/'], [['AccountCode' => '450']]));
+
+    $result = xeroReader($fake)->recodeBankTransaction(
+        connection(),
+        'spend-uuid-2',
+        BankTransactionChange::allLines('450'),
+        RecodeExpectation::from($decidedAgainst),
+        'recode-op-123',
+    );
+
+    expect(methodsOf($fake))->toBe(['GET'])
+        ->and($result->recovered)->toBeTrue()
+        ->and($result->after->accountCodes())->toBe(['450'])
+        ->and($result->before->accountCodesByLine())->toBe($decidedAgainst->accountCodesByLine())
+        ->and($result->before->updatedDateUtc?->format('U'))->toBe($decidedAgainst->updatedDateUtc?->format('U'))
+        ->and($result->before->total->amount)->toBe($result->after->total->amount)
+        ->and($result->changedCoding())->toBeTrue();
+});
+
+it('still refuses a read that differs in any way other than the change itself', function () {
+    // Coded to the intended account AND to something else on another line, or to
+    // a different account altogether: a person was here, and the decision is stale.
+    $decidedAgainst = xeroReaderRead(transactionResponse('spend-uuid-2'));
+
+    $fake = fakeHttp();
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['UpdatedDateUTC' => '/Date(1787745700000+0000)/'], [['AccountCode' => '470']]));
+
+    expect(fn () => xeroReader($fake)->recodeBankTransaction(
+        connection(),
+        'spend-uuid-2',
+        BankTransactionChange::allLines('450'),
+        RecodeExpectation::from($decidedAgainst),
+        'recode-op-123',
+    ))->toThrow(PreconditionFailedException::class);
 
     expect(methodsOf($fake))->toBe(['GET']);
 });

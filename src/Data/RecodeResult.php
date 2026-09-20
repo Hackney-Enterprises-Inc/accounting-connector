@@ -14,9 +14,18 @@ namespace Hei\AccountingConnector\Data;
  */
 final readonly class RecodeResult
 {
+    /**
+     * @param  bool  $recovered  True when no write was made because the connector's
+     *                           read already showed the change applied: an earlier
+     *                           attempt landed and its response was lost. `$before`
+     *                           is then the expectation laid over that read (the
+     *                           codes the decision was made against, amounts as the
+     *                           read holds them), not a read of its own.
+     */
     public function __construct(
         public BankTransactionData $before,
         public BankTransactionData $after,
+        public bool $recovered = false,
     ) {}
 
     /**

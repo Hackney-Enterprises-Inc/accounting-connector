@@ -89,6 +89,12 @@ abstract class ContractCase extends TestCase
         $this->store = new FileConnectionStore($this->environment->tokenFile());
         $this->xero = $this->environment->connector($this->http, $this->store);
         $this->connection = $this->environment->connection();
+
+        // One refresh up front when the stored token has lapsed, persisted through
+        // the store. Xero's refresh tokens are single-use: handing the connector the
+        // same expired Connection on every helper call would refresh once and get
+        // invalid_grant on the second.
+        $this->connection = $this->freshConnection();
     }
 
     protected function tearDown(): void
@@ -147,7 +153,7 @@ abstract class ContractCase extends TestCase
             localId: 'contract-'.$tag.'-'.bin2hex(random_bytes(3)),
         );
 
-        $id = $this->xero->createEntity(EntityType::Expense, $expense, $this->connection);
+        $id = $this->xero->createEntity(EntityType::Expense, $expense, $this->freshConnection());
 
         if ($id === null) {
             throw new RuntimeException('Xero accepted the fixture SPEND but returned no id.');
@@ -160,7 +166,7 @@ abstract class ContractCase extends TestCase
 
     protected function find(string $id): ?BankTransactionData
     {
-        return $this->xero->findBankTransaction($this->connection, $id);
+        return $this->xero->findBankTransaction($this->freshConnection(), $id);
     }
 
     /**
@@ -176,8 +182,7 @@ abstract class ContractCase extends TestCase
     {
         if (method_exists($this->xero, 'recodeBankTransaction')) {
             /** @phpstan-ignore-next-line T8 adds this method and its DTOs. */
-            $result = $this->xero->recodeBankTransaction(
-                $this->connection,
+            $result = $this->xero->recodeBankTransaction($this->freshConnection(),
                 $id,
                 new BankTransactionChange($codings),
             );
@@ -185,7 +190,7 @@ abstract class ContractCase extends TestCase
             return $result->after;
         }
 
-        return $this->xero->updateBankTransactionCoding($this->connection, $id, $codings);
+        return $this->xero->updateBankTransactionCoding($this->freshConnection(), $id, $codings);
     }
 
     /**
@@ -199,7 +204,7 @@ abstract class ContractCase extends TestCase
         $query = new BankTransactionQuery(type: BankTransactionType::Spend, status: 'AUTHORISED');
 
         for ($page = 0; $page < $maxPages; $page++) {
-            $result = $this->xero->listBankTransactions($this->connection, $query);
+            $result = $this->xero->listBankTransactions($this->freshConnection(), $query);
 
             foreach ($result->transactions as $transaction) {
                 $line = $transaction->lines[0] ?? null;
@@ -229,7 +234,7 @@ abstract class ContractCase extends TestCase
      */
     protected function anotherExpenseAccountCode(string $not): string
     {
-        foreach (Account::only($this->xero->chartOfAccounts($this->connection), AccountClass::Expense) as $account) {
+        foreach (Account::only($this->xero->chartOfAccounts($this->freshConnection()), AccountClass::Expense) as $account) {
             if ($account->code !== null && $account->code !== '' && $account->code !== $not) {
                 return $account->code;
             }
@@ -246,7 +251,7 @@ abstract class ContractCase extends TestCase
             return $configured;
         }
 
-        foreach (Account::only($this->xero->chartOfAccounts($this->connection), AccountClass::Expense) as $account) {
+        foreach (Account::only($this->xero->chartOfAccounts($this->freshConnection()), AccountClass::Expense) as $account) {
             if ($account->code !== null && $account->code !== '') {
                 return $account->code;
             }
@@ -263,7 +268,7 @@ abstract class ContractCase extends TestCase
             return $configured;
         }
 
-        $accounts = $this->xero->bankAccounts($this->connection);
+        $accounts = $this->xero->bankAccounts($this->freshConnection());
 
         if ($accounts === []) {
             throw new RuntimeException('The demo company has no bank account to post a fixture SPEND to.');
@@ -274,7 +279,7 @@ abstract class ContractCase extends TestCase
 
     protected function baseCurrency(): string
     {
-        return $this->xero->tenantInfo($this->connection)?->currencyCode ?? 'USD';
+        return $this->xero->tenantInfo($this->freshConnection())?->currencyCode ?? 'USD';
     }
 
     /**
@@ -363,7 +368,7 @@ abstract class ContractCase extends TestCase
 
         try {
             /** @phpstan-ignore-next-line T10 adds this method. */
-            $this->xero->deleteBankTransaction($this->connection, $id);
+            $this->xero->deleteBankTransaction($this->freshConnection(), $id);
         } catch (Throwable $e) {
             $this->recordAnswer('cleanup', "could not delete {$id}: ".$e->getMessage());
         }

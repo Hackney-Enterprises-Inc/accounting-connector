@@ -170,6 +170,9 @@ function recordingGate(?RateLimitException $refuseWith = null): RequestGate
         /** @var array<int, array{provider: string|null, tenant: string|null}> */
         public array $acquired = [];
 
+        /** @var array<int, array{status: int, provider: string|null, tenant: string|null}> */
+        public array $observed = [];
+
         /** @var array<int, array{provider: string|null, tenant: string|null, failure: string}> */
         public array $released = [];
 
@@ -182,6 +185,11 @@ function recordingGate(?RateLimitException $refuseWith = null): RequestGate
             if ($this->refuseWith !== null) {
                 throw $this->refuseWith;
             }
+        }
+
+        public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void
+        {
+            $this->observed[] = ['status' => $response->status, 'provider' => $provider?->value, 'tenant' => $tenantId];
         }
 
         public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void
@@ -304,6 +312,40 @@ it('never lets a listener fail the request', function () {
     expect($response->status)->toBe(200);
 });
 
+it('tells the gate about every response it receives, the ones it retries included', function () {
+    // The gate admitted the attempt; it hears how each one ended without the host
+    // wiring a listener: the 429 and the 503 the client retries, then the 200.
+    $fake = fakeHttp();
+    $fake->queue(429, [], ['Retry-After' => '1']);
+    $fake->queue(503, []);
+    $fake->queue(200, ['ok' => true]);
+    $gate = recordingGate();
+
+    clientWithGate($fake, $gate)->send('GET', 'https://api.xero.com/x', provider: Provider::Xero, tenantId: 'tenant-1');
+
+    expect(array_column($gate->observed, 'status'))->toBe([429, 503, 200])
+        ->and($gate->observed[2])->toBe(['status' => 200, 'provider' => 'xero', 'tenant' => 'tenant-1'])
+        ->and($gate->released)->toBeEmpty();
+});
+
+it('never lets a gate fault on observe fail the request', function () {
+    $gate = new class implements RequestGate
+    {
+        public function acquire(?Provider $provider, ?string $tenantId): void {}
+
+        public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void
+        {
+            throw new RuntimeException('gate exploded on observe');
+        }
+
+        public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void {}
+    };
+    $fake = fakeHttp();
+    $fake->queue(200, ['ok' => true]);
+
+    expect(clientWithGate($fake, $gate)->send('GET', 'https://api.xero.com/x', provider: Provider::Xero)->status)->toBe(200);
+});
+
 it('hands every attempt that produced no response back to the gate', function () {
     // A timeout admits an attempt and then never reports a response, so the gate
     // would otherwise keep whatever it reserved (an in-flight slot) until it
@@ -331,6 +373,8 @@ it('never lets a gate fault on release replace the transport failure', function 
     $gate = new class implements RequestGate
     {
         public function acquire(?Provider $provider, ?string $tenantId): void {}
+
+        public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void {}
 
         public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void
         {

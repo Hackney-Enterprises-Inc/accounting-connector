@@ -50,6 +50,28 @@ final readonly class BankTransactionLine
     ) {}
 
     /**
+     * The same line coded to another account (the account id is dropped: it named
+     * the code this line no longer carries).
+     */
+    public function withAccountCode(?string $accountCode): self
+    {
+        return new self(
+            lineItemId: $this->lineItemId,
+            description: $this->description,
+            quantity: $this->quantity,
+            unitAmount: $this->unitAmount,
+            lineAmount: $this->lineAmount,
+            accountCode: $accountCode,
+            accountId: null,
+            taxType: $this->taxType,
+            tracking: $this->tracking,
+            unitAmountExact: $this->unitAmountExact,
+            taxAmount: $this->taxAmount,
+            itemCode: $this->itemCode,
+        );
+    }
+
+    /**
      * Whether anybody has coded this line to an account yet.
      *
      * The question the matcher asks before deciding whether pushing the document's

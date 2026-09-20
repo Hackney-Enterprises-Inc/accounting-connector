@@ -14,6 +14,7 @@ use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Events\EntityCreated;
 use Hei\AccountingConnector\Exceptions\AccountingConnectorException;
 use Hei\AccountingConnector\Http\HttpClient;
+use Hei\AccountingConnector\Http\HttpResponse;
 use Hei\AccountingConnector\Http\NullRequestGate;
 use Hei\AccountingConnector\Http\RequestGate;
 use Hei\AccountingConnector\Laravel\AccountingConnectorServiceProvider;
@@ -179,6 +180,8 @@ it('hands a host-bound request gate to the HTTP client', function () {
 
             throw new AccountingConnectorException('stopped by the gate');
         }
+
+        public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void {}
 
         public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void {}
     };

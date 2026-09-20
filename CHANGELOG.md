@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Every bank transaction write that echoes line amounts (the recode, the delete) carries
+  `unitdp=4` like the reads, so a four-place `UnitAmount` is not rounded to cents by Xero on the
+  way in and the row it answers with compares at the same precision (invariant 15).
+- The tax guard before a recode is exact: a stored line tax that differs from the rate's
+  recomputation by any amount, a cent included, is refused with `tax_override_would_be_lost`
+  before anything is sent. The cent of slack let a write "correct" the tax and move the total.
+- `RecodeInvariants::movedMoney()` compares each line's tax amount and exact unit price as well
+  as its amount and quantity, so taxes moving between lines under unchanged header totals, or a
+  unit price the provider re-rounded, are reported as moved money.
+- A recode retried with the same expectation after a lost response no longer fails its
+  precondition: when the connector's own read already shows exactly the state the change would
+  have produced from the expected one (targeted lines coded as asked, every other line as
+  expected, the provider's stamp not gone backwards), nothing is sent and the read is returned as
+  `RecodeResult` with `recovered: true`; its `before` is the expectation laid over that read.
+  `BankTransactionChange::isSatisfiedBy()` / `codesAfter()`, `BankTransactionData::withAccountCodes()`
+  and `BankTransactionLine::withAccountCode()` are the pieces. The fake does the same.
+- `RequestGate::observe(HttpResponse, ?Provider, ?string $tenantId)` is called by `HttpClient`
+  for every response it receives, retried 429s and 5xx included, before its own listeners; a gate
+  that throws there is logged and ignored. `NullRequestGate` implements it as a no-op. A host that
+  binds a gate no longer has to register an `afterResponse()` listener for the gate's bookkeeping.
+- `AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS` (`chart_of_accounts_v2`) is the lookup key both
+  connectors store the chart of accounts under. Versioned because rows stored before
+  `system_account` existed rehydrate without the flag; hosts reading the store must use the constant.
+- The QuickBooks connector refuses a RECEIVE expense on an update as it already did on a create,
+  before the SyncToken read.
+- `FakeConnector::flush()` also clears a queued `afterNextBankTransactionCall()` callback.
+- `CodesBankTransactions::updateBankTransactionCoding()` documents the `InvalidPayloadException`
+  it throws when the codings would change nothing.
+
 ### Added
 
 - A test that a two-line exclusive-tax bank transaction round-trips every line's Quantity,
