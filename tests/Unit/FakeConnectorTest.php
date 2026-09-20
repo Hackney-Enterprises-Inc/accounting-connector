@@ -5,8 +5,12 @@ declare(strict_types=1);
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
 use Hei\AccountingConnector\Data\ContactData;
+use Hei\AccountingConnector\Data\ExpenseData;
+use Hei\AccountingConnector\Data\LineItem;
+use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Enums\EntityType;
+use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
 use Hei\AccountingConnector\Exceptions\ServerException;
@@ -24,6 +28,24 @@ it('records what a consuming application asked it to create', function () {
         ->and($fake->created[0]['idempotency_key'])->toBe('sync-bill-doc-42')
         ->and($fake->createdOf(EntityType::Bill))->toHaveCount(1)
         ->and($fake->createdOf(EntityType::Expense))->toBeEmpty();
+});
+
+it('records which way an expense went, so a refund can be asserted as a RECEIVE', function () {
+    $fake = new FakeConnector(Provider::Xero);
+
+    $refund = new ExpenseData(
+        vendor: 'Corner Store',
+        date: new DateTimeImmutable('2026-08-22'),
+        lines: [new LineItem('Refund', unitAmount: Money::cents(1250), accountCode: '400')],
+        bankAccount: 'bank-1',
+        direction: MoneyDirection::In,
+    );
+
+    $fake->createEntity(EntityType::Expense, $refund, connection());
+    $fake->createEntity(EntityType::Bill, billFor(), connection());
+
+    expect($fake->createdOf(EntityType::Expense)[0]['direction'])->toBe(MoneyDirection::In)
+        ->and($fake->createdOf(EntityType::Bill)[0]['direction'])->toBeNull();
 });
 
 it('can be told to fail, so a host error branch gets covered', function () {
@@ -164,6 +186,22 @@ it('resolves a contact to a deterministic id and records every call', function (
         ->and($fake->contacts[0]['contact']->name)->toBe('Acme Supply')
         ->and($fake->contacts[0]['contact']->role)->toBe(EntityType::Vendor)
         ->and($fake->contacts[1]['connection']->tenantId)->toBe('tenant-1');
+});
+
+it('resolves the same contact to the same id, like an entity map would', function () {
+    $fake = new FakeConnector(Provider::Xero);
+
+    $first = $fake->resolveContact(ContactData::vendor('Acme Supply'), connection());
+    $again = $fake->resolveContact(ContactData::vendor('acme supply'), connection());
+    $other = $fake->resolveContact(ContactData::vendor('Northwind'), connection());
+
+    expect($again)->toBe($first)
+        ->and($other)->not->toBe($first)
+        ->and($fake->contacts)->toHaveCount(3);
+
+    $fake->flush();
+
+    expect($fake->resolveContact(ContactData::vendor('Acme Supply'), connection()))->toBe('fake-contact-1');
 });
 
 it('can be told which ids the next contact resolutions return', function () {

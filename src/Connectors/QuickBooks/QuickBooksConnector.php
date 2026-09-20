@@ -412,6 +412,17 @@ final class QuickBooksConnector extends AbstractConnector
                 /** @var ExpenseData $expense */
                 $expense = $this->as($payload, ExpenseData::class);
                 $this->assertPaymentType($expense->paymentMethod);
+
+                if ($expense->direction->isIn()) {
+                    // A Purchase is money out by definition. Posting a refund as one
+                    // would record the money leaving twice; refusing is the honest answer
+                    // until a Deposit mapping exists.
+                    throw new InvalidPayloadException(
+                        'QuickBooks has no money-in purchase; a RECEIVE expense cannot be posted here.',
+                        $this->provider(),
+                    );
+                }
+
                 $account = $expense->bankAccount ?? $connection->setting('bank_account');
 
                 if (! is_string($account) || $account === '') {
@@ -560,6 +571,7 @@ final class QuickBooksConnector extends AbstractConnector
             ],
             $body,
             $this->provider(),
+            $connection->tenantId,
         );
 
         if ($response->failed()) {
@@ -1011,6 +1023,7 @@ final class QuickBooksConnector extends AbstractConnector
             ],
             null,
             $this->provider(),
+            $connection->tenantId,
         );
     }
 
@@ -1040,6 +1053,7 @@ final class QuickBooksConnector extends AbstractConnector
             ],
             json_encode($body, JSON_THROW_ON_ERROR),
             $this->provider(),
+            $connection->tenantId,
         );
     }
 

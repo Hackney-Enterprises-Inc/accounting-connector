@@ -16,6 +16,13 @@ namespace Hei\AccountingConnector\Data;
  * transaction on a POST, so a host that wants to change one line's account has to
  * send every line back, each carrying the id it came with, or Xero treats the
  * absent ones as deleted and the present ones as new.
+ *
+ * `$unitAmountExact` is the unit price as the wire carried it, to four places when
+ * the read asked for them. `$unitAmount` is the same figure in cents for display and
+ * comparison; it is not what goes back, because Xero recomputes a line from
+ * Quantity times UnitAmount and a price rounded to cents moves the line.
+ * `$taxAmount` is read so a recode can tell whether somebody overrode the tax by
+ * hand; it is never sent, because the BankTransactions endpoint ignores it.
  */
 final readonly class BankTransactionLine
 {
@@ -34,6 +41,12 @@ final readonly class BankTransactionLine
         public ?string $accountId = null,
         public ?string $taxType = null,
         public array $tracking = [],
+        /** The unit price exactly as received, for example "1.3333". */
+        public ?string $unitAmountExact = null,
+        /** The tax on this line as the provider holds it. */
+        public ?Money $taxAmount = null,
+        /** The inventory item code on the line, when there is one. */
+        public ?string $itemCode = null,
     ) {}
 
     /**
@@ -67,6 +80,9 @@ final readonly class BankTransactionLine
                 'category_name' => $ref->categoryName,
                 'option_name' => $ref->optionName,
             ], $this->tracking),
+            'unit_amount_exact' => $this->unitAmountExact,
+            'tax_amount' => $this->taxAmount?->amount,
+            'item_code' => $this->itemCode,
         ];
     }
 
@@ -94,6 +110,9 @@ final readonly class BankTransactionLine
             accountId: isset($data['account_id']) ? (string) $data['account_id'] : null,
             taxType: isset($data['tax_type']) ? (string) $data['tax_type'] : null,
             tracking: $tracking,
+            unitAmountExact: isset($data['unit_amount_exact']) ? (string) $data['unit_amount_exact'] : null,
+            taxAmount: isset($data['tax_amount']) ? Money::cents((int) $data['tax_amount']) : null,
+            itemCode: isset($data['item_code']) ? (string) $data['item_code'] : null,
         );
     }
 }

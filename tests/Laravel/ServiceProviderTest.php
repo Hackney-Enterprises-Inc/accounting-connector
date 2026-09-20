@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use GuzzleHttp\Client;
 use Hei\AccountingConnector\ConnectorManager;
 use Hei\AccountingConnector\Connectors\Xero\XeroConnector;
 use Hei\AccountingConnector\Contracts\ConnectionStore;
@@ -12,6 +13,9 @@ use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Events\EntityCreated;
 use Hei\AccountingConnector\Exceptions\AccountingConnectorException;
+use Hei\AccountingConnector\Http\HttpClient;
+use Hei\AccountingConnector\Http\NullRequestGate;
+use Hei\AccountingConnector\Http\RequestGate;
 use Hei\AccountingConnector\Laravel\AccountingConnectorServiceProvider;
 use Hei\AccountingConnector\Laravel\DatabaseConnectionRepository;
 use Hei\AccountingConnector\Laravel\DatabaseEntityMap;
@@ -158,4 +162,63 @@ it('republishes migrations over the existing files rather than duplicating them'
     } finally {
         $sweep();
     }
+});
+
+it('leaves the request gate open unless the host binds one', function () {
+    expect(app(RequestGate::class))->toBeInstanceOf(NullRequestGate::class);
+});
+
+it('hands a host-bound request gate to the HTTP client', function () {
+    $gate = new class implements RequestGate
+    {
+        public int $asked = 0;
+
+        public function acquire(?Provider $provider, ?string $tenantId): void
+        {
+            $this->asked++;
+
+            throw new AccountingConnectorException('stopped by the gate');
+        }
+
+        public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void {}
+    };
+
+    $this->app->instance(RequestGate::class, $gate);
+    $this->app->forgetInstance(HttpClient::class);
+
+    expect(fn () => app(HttpClient::class)->send('GET', 'https://api.xero.com/never'))
+        ->toThrow(AccountingConnectorException::class, 'stopped by the gate');
+
+    expect($gate->asked)->toBe(1);
+});
+
+it('builds the HTTP client over a Guzzle client with timeouts rather than a discovered one', function () {
+    config()->set('accounting-connector.http.timeout', 12);
+    config()->set('accounting-connector.http.connect_timeout', 3);
+    $this->app->forgetInstance(HttpClient::class);
+
+    $client = app(HttpClient::class);
+
+    $property = new ReflectionProperty(HttpClient::class, 'client');
+    $guzzle = $property->getValue($client);
+
+    expect($guzzle)->toBeInstanceOf(Client::class);
+
+    /** @var Client $guzzle */
+    $config = (new ReflectionProperty(Client::class, 'config'))->getValue($guzzle);
+
+    expect($config)->toBeArray()
+        ->and($config['timeout'])->toBe(12.0)
+        ->and($config['connect_timeout'])->toBe(3.0);
+});
+
+it('gives the Xero connector the configured bank transaction page size', function () {
+    config()->set('accounting-connector.bank_transactions.page_size', 500);
+    $this->app->forgetInstance(ConnectorManager::class);
+
+    $connector = app(ConnectorManager::class)->for(Provider::Xero);
+
+    $size = (new ReflectionProperty(XeroConnector::class, 'bankTransactionPageSize'))->getValue($connector);
+
+    expect($size)->toBe(500);
 });

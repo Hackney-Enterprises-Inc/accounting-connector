@@ -65,6 +65,7 @@
     },
     "scripts": {
         "test": "pest",
+        "test:contract": "pest --configuration=phpunit.contract.xml",
         "analyse": "phpstan analyse",
         "format": "pint"
     },

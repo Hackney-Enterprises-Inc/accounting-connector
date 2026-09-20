@@ -33,9 +33,11 @@ interface ReadsBankTransactions
     /**
      * One page of bank transactions matching the query.
      *
-     * Ordered by the provider, which for Xero means no guaranteed order at all, so a
-     * host that pages must page to the end rather than stopping at a date it
-     * recognises.
+     * Ordered as the query asks, or by the provider's default when it does not: for
+     * Xero that is `UpdatedDateUTC ASC` with the transaction id as a tiebreak. An
+     * order is not a snapshot; a row edited while a host is paging moves, and the
+     * page carries the provider's item count so the host can prove the walk was
+     * complete rather than assume it.
      *
      * @throws ConnectionRevokedException when the connection is dead
      */

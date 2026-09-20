@@ -54,14 +54,37 @@ return [
     | Retries apply to 429s, 5xx responses and transport failures only. A 4xx is
     | never retried: the same rejected payload will be rejected the same way.
     |
-    | Xero allows 5 requests in flight per tenant and 60 calls a minute, shared
-    | with every other app the customer has connected. Retries here do not protect
-    | you from a queue running 20 sync workers at once; keep that concurrency low.
+    | Xero meters each app per connected organisation: 5 requests in flight, 60
+    | calls a minute and 5,000 a day, none of it shared with other apps the
+    | customer uses. Retries here do not protect you from a queue running 20 sync
+    | workers at once; bind a RequestGate to spend the allowance deliberately and
+    | keep that concurrency low.
+    |
+    | Timeouts are in seconds. A discovered Guzzle client waits forever, and a hung
+    | provider call inside a scheduled command has nothing else to stop it.
     |
     */
 
     'http' => [
         'max_retries' => env('ACCOUNTING_CONNECTOR_MAX_RETRIES', 3),
+        'timeout' => env('ACCOUNTING_CONNECTOR_HTTP_TIMEOUT', 30),
+        'connect_timeout' => env('ACCOUNTING_CONNECTOR_HTTP_CONNECT_TIMEOUT', 10),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Bank transactions
+    |--------------------------------------------------------------------------
+    |
+    | Rows per page when a BankTransactionQuery does not say. Xero's endpoint
+    | documentation says 250 and its OpenAPI spec says 1000; the documented figure
+    | is the default until a contract test against a live organisation records the
+    | accepted maximum. Raise it here once it has.
+    |
+    */
+
+    'bank_transactions' => [
+        'page_size' => env('ACCOUNTING_CONNECTOR_BANK_TRANSACTION_PAGE_SIZE', 250),
     ],
 
     /*

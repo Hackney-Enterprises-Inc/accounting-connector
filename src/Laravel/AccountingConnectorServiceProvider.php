@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hei\AccountingConnector\Laravel;
 
+use GuzzleHttp\Client;
 use Hei\AccountingConnector\ConnectorManager;
 use Hei\AccountingConnector\Connectors\QuickBooks\QuickBooksConnector;
 use Hei\AccountingConnector\Connectors\Xero\XeroConnector;
@@ -13,6 +14,8 @@ use Hei\AccountingConnector\Contracts\EntityMap;
 use Hei\AccountingConnector\Contracts\LookupStore;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Http\HttpClient;
+use Hei\AccountingConnector\Http\NullRequestGate;
+use Hei\AccountingConnector\Http\RequestGate;
 use Hei\AccountingConnector\Support\NullConnectionStore;
 use Hei\AccountingConnector\Support\NullEntityMap;
 use Hei\AccountingConnector\Support\NullLookupStore;
@@ -22,6 +25,7 @@ use Illuminate\Contracts\Events\Dispatcher as LaravelDispatcher;
 use Illuminate\Database\ConnectionResolverInterface;
 use Illuminate\Support\ServiceProvider;
 use Psr\EventDispatcher\EventDispatcherInterface;
+use Psr\Http\Client\ClientInterface;
 use Psr\Log\LoggerInterface;
 use Psr\SimpleCache\CacheInterface;
 
@@ -44,10 +48,17 @@ final class AccountingConnectorServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/config/accounting-connector.php', 'accounting-connector');
 
+        // Open by default. A host that wants to budget its allowance binds its own:
+        //
+        //     $this->app->bind(RequestGate::class, XeroRequestBudget::class);
+        $this->app->bindIf(RequestGate::class, NullRequestGate::class);
+
         $this->app->singleton(HttpClient::class, function (Container $app): HttpClient {
             return HttpClient::discover(
                 logger: $app->make(LoggerInterface::class),
                 maxRetries: (int) config('accounting-connector.http.max_retries', 3),
+                gate: $app->make(RequestGate::class),
+                client: $this->psrClient(),
             );
         });
 
@@ -115,7 +126,7 @@ final class AccountingConnectorServiceProvider extends ServiceProvider
             $manager = new ConnectorManager;
 
             if ($this->configured('xero')) {
-                $manager->register(Provider::Xero, fn (): XeroConnector => new XeroConnector(
+                $manager->register(Provider::Xero, fn (): XeroConnector => (new XeroConnector(
                     http: $app->make(HttpClient::class),
                     clientId: (string) config('accounting-connector.xero.client_id'),
                     clientSecret: (string) config('accounting-connector.xero.client_secret'),
@@ -127,6 +138,8 @@ final class AccountingConnectorServiceProvider extends ServiceProvider
                     events: $this->events($app),
                     logger: $app->make(LoggerInterface::class),
                     lookupTtl: (int) config('accounting-connector.cache.ttl', 3600),
+                ))->usingBankTransactionPageSize(
+                    (int) config('accounting-connector.bank_transactions.page_size', 250),
                 ));
             }
 
@@ -206,6 +219,27 @@ final class AccountingConnectorServiceProvider extends ServiceProvider
         return config('accounting-connector.events.enabled', true)
             ? $app->make(LaravelEventDispatcher::class)
             : null;
+    }
+
+    /**
+     * A PSR-18 client with timeouts, or null to let discovery pick one without.
+     *
+     * Guzzle is what every Laravel application ships and what discovery would find
+     * anyway; building it here rather than discovering it is the only way to give
+     * it a timeout. A host without Guzzle falls back to discovery and gets whatever
+     * that client's own defaults are, which for most clients is "wait forever".
+     */
+    private function psrClient(): ?ClientInterface
+    {
+        if (! class_exists(Client::class)) {
+            return null;
+        }
+
+        return new Client([
+            'timeout' => (float) config('accounting-connector.http.timeout', 30),
+            'connect_timeout' => (float) config('accounting-connector.http.connect_timeout', 10),
+            'http_errors' => false,
+        ]);
     }
 
     /**

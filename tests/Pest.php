@@ -114,6 +114,32 @@ function xeroWithStore(FakeHttpClient $fake, ?ArrayLookupStore $store = null): X
     );
 }
 
+/**
+ * A Xero connector over a fake transport with no retries, for the bank transaction reads.
+ */
+function xeroReader(FakeHttpClient $fake): XeroConnector
+{
+    return new XeroConnector(
+        http: httpClientOver($fake, maxRetries: 0),
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        redirectUri: 'https://app.test/callback',
+    );
+}
+
+/**
+ * The query string of a recorded request, decoded.
+ *
+ * @return array<string, string>
+ */
+function queryOf(FakeHttpClient $fake, int $index): array
+{
+    parse_str((string) $fake->requests[$index]->getUri()->getQuery(), $parsed);
+
+    /** @var array<string, string> $parsed */
+    return $parsed;
+}
+
 function qboConnection(array $settings = [], ?string $expires = '+30 minutes'): Connection
 {
     return new Connection(

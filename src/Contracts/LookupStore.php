@@ -15,8 +15,8 @@ use Hei\AccountingConnector\Data\Connection;
  * cache, for two reasons worth preserving:
  *
  *  1. They survive a cache flush. Otherwise every deploy that clears the cache makes
- *     the next settings page load hit Xero three times, per organization, against a
- *     60-calls-per-minute ceiling shared with every other app the customer uses.
+ *     the next settings page load hit Xero three times, per organization, against
+ *     this app's own 60-calls-per-minute ceiling for that organisation.
  *  2. They are served when the provider is unreachable. A Xero outage should make a
  *     settings page slightly stale, not empty. An empty account dropdown reads to a
  *     customer as "my chart of accounts is gone".
