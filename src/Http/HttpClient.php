@@ -15,6 +15,7 @@ use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use Throwable;
 
 /**
  * The one place this package makes an HTTP call.
@@ -41,9 +42,18 @@ use Psr\Log\NullLogger;
  * Anything it never retries is returned as a response for the caller to interpret,
  * because a 400 from Xero and a 400 from Intuit mean different things and only the
  * connector knows which.
+ *
+ * Two hooks let a host spend its allowance on purpose rather than discover it is
+ * gone: a {@see RequestGate} is asked before every attempt, retries included, and
+ * every response the client receives is handed to the listeners registered with
+ * {@see self::afterResponse()} together with the provider's remaining-call counters.
+ * The client itself never budgets; it only makes budgeting possible.
  */
 final class HttpClient
 {
+    /** @var array<int, callable(HttpResponse, Provider|null, string|null): void> */
+    private array $afterResponse = [];
+
     public function __construct(
         private readonly ClientInterface $client,
         private readonly RequestFactoryInterface $requestFactory,
@@ -56,32 +66,79 @@ final class HttpClient
         private readonly float $baseDelay = 0.5,
         /** Refuse to honour an absurd Retry-After rather than hanging a worker. */
         private readonly int $maxRetryAfter = 60,
+        /** Asked before every attempt. Open by default. */
+        private readonly RequestGate $gate = new NullRequestGate,
     ) {}
 
     /**
      * Build one with whatever PSR-18 and PSR-17 implementations are installed.
      *
-     * Every Laravel application already ships Guzzle, so discovery finds one.
+     * Every Laravel application already ships Guzzle, so discovery finds one. Pass
+     * a client to control what discovery cannot, such as timeouts: a discovered
+     * Guzzle client waits forever, and a hung provider call inside a scheduled
+     * command has nothing else to stop it.
      */
     public static function discover(
         ?LoggerInterface $logger = null,
         ?Sleeper $sleeper = null,
         int $maxRetries = 3,
+        ?RequestGate $gate = null,
+        ?ClientInterface $client = null,
     ): self {
         return new self(
-            client: Psr18ClientDiscovery::find(),
+            client: $client ?? Psr18ClientDiscovery::find(),
             requestFactory: Psr17FactoryDiscovery::findRequestFactory(),
             streamFactory: Psr17FactoryDiscovery::findStreamFactory(),
             logger: $logger ?? new NullLogger,
             sleeper: $sleeper ?? new RealSleeper,
             maxRetries: $maxRetries,
+            gate: $gate ?? new NullRequestGate,
         );
+    }
+
+    /**
+     * Hear about every response this client receives, retried or not.
+     *
+     * The listener gets the response (so it can read {@see HttpResponse::rateLimitRemaining()}
+     * and the `X-Rate-Limit-Problem` header), the provider and the tenant the request
+     * was made for. A 429 that is about to be retried is reported too, because that
+     * is exactly when a budget wants to know. Listeners must not throw; one that does
+     * is logged and ignored, since a metrics hook must never be the reason a posting
+     * failed.
+     *
+     * @param  callable(HttpResponse, Provider|null, string|null): void  $listener
+     */
+    public function afterResponse(callable $listener): self
+    {
+        $this->afterResponse[] = $listener;
+
+        return $this;
+    }
+
+    /**
+     * Hand an attempt back to the gate after a transport failure.
+     *
+     * The gate must not throw here, but the request is already failing and a gate
+     * fault must not turn a retryable timeout into an unrelated exception.
+     */
+    private function releaseQuietly(?Provider $provider, ?string $tenantId, ClientExceptionInterface $failure): void
+    {
+        try {
+            $this->gate->release($provider, $tenantId, $failure);
+        } catch (Throwable $e) {
+            $this->logger->warning('A request gate threw while releasing a failed attempt; ignoring it.', [
+                'provider' => $provider?->value,
+                'tenant' => $tenantId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
      * Send a request, retrying the retryable.
      *
      * @param  array<string, string>  $headers
+     * @param  string|null  $tenantId  The provider tenant the request is for, when there is one.
      */
     public function send(
         string $method,
@@ -89,15 +146,25 @@ final class HttpClient
         array $headers = [],
         ?string $body = null,
         ?Provider $provider = null,
+        ?string $tenantId = null,
     ): HttpResponse {
         $attempt = 0;
 
         while (true) {
             $attempt++;
 
+            // Before every attempt, not only the first: a retry is a request too,
+            // and the allowance it spends is the same allowance.
+            $this->gate->acquire($provider, $tenantId);
+
             try {
                 $response = $this->dispatch($method, $url, $headers, $body);
             } catch (ClientExceptionInterface $e) {
+                // No response will reach the listeners for this attempt, so the
+                // gate hears about it here or never: an in-flight slot it reserved
+                // would otherwise sit taken until it expired.
+                $this->releaseQuietly($provider, $tenantId, $e);
+
                 if ($attempt > $this->maxRetries) {
                     throw new ServerException(
                         sprintf('Could not reach %s after %d attempts: %s', $this->host($url), $attempt, $e->getMessage()),
@@ -112,6 +179,8 @@ final class HttpClient
 
                 continue;
             }
+
+            $this->observe($response, $provider, $tenantId);
 
             if ($response->status === 429) {
                 if ($attempt > $this->maxRetries) {
@@ -194,6 +263,35 @@ final class HttpClient
             body: (string) $response->getBody(),
             headers: $normalised,
         );
+    }
+
+    /**
+     * Hand a received response to the listeners, without letting one of them fail the call.
+     */
+    private function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void
+    {
+        // The gate first: it admitted the attempt and is the one thing that must
+        // hear how it ended, listener or no listener.
+        try {
+            $this->gate->observe($response, $provider, $tenantId);
+        } catch (Throwable $e) {
+            $this->logger->warning('A request gate threw while observing a response; ignoring it.', [
+                'provider' => $provider?->value,
+                'tenant' => $tenantId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        foreach ($this->afterResponse as $listener) {
+            try {
+                $listener($response, $provider, $tenantId);
+            } catch (Throwable $e) {
+                $this->logger->warning('An accounting connector response listener threw and was ignored.', [
+                    'provider' => $provider?->value,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
     }
 
     private function backOff(int $attempt, string $url, string $reason): void

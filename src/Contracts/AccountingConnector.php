@@ -38,6 +38,20 @@ use Hei\AccountingConnector\Exceptions\ValidationException;
  */
 interface AccountingConnector
 {
+    /**
+     * The lookup key every connector stores its chart of accounts under, in the
+     * LookupStore and the PSR-16 cache alike.
+     *
+     * Versioned because a stored row outlives the shape of Account: rows written
+     * before `system_account` existed rehydrate with the flag missing, and a guard
+     * that keeps a system account out of a rule or a holding list would read them
+     * as ordinary accounts until the row happened to be refreshed. Bumping the key
+     * leaves the old rows behind and makes every reader fetch afresh once. A host
+     * that asks the store about the chart (its last sync time, say) must use this
+     * constant, never the literal.
+     */
+    public const LOOKUP_CHART_OF_ACCOUNTS = 'chart_of_accounts_v2';
+
     public function provider(): Provider;
 
     /**

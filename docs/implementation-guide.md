@@ -347,9 +347,11 @@ miss those documents.
 
 - **One sync job per connection at a time** (`WithoutOverlapping` keyed on the tenant, as in
   Step 7). This respects Xero's 5-in-flight ceiling and prevents the concurrent-refresh race.
-- **Modest total concurrency.** Xero allows 60 calls a minute per tenant, shared with every other
-  app the customer connected. The package's retries handle bursts; they do not make twenty
-  workers a good idea.
+- **Modest total concurrency.** Xero allows this app 60 calls a minute against each connected
+  organisation and, per day, 1,000 calls on the Starter app tier or 5,000 on the Core tier and
+  above, none of it shared with the customer's other apps. The package's
+  retries handle bursts; a `RequestGate` bound in the container spends the allowance on purpose;
+  neither makes twenty workers a good idea.
 - **Back off on `RateLimitException`** using its `retryAfter` rather than a fixed delay.
 
 ## Step 10 — Test your integration

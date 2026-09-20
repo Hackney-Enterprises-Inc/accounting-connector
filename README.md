@@ -302,14 +302,22 @@ Everything the package throws extends `AccountingConnectorException`, which carr
 
 ## Rate limits
 
-Xero, all per tenant: **60 calls a minute**, **5,000 a day** once your app is certified (1,000
-before), and **no more than 5 requests in flight**. The per-minute ceiling is shared with every
-other app your customer has connected, so a busy organization can rate-limit you through no fault of
-your own.
+Xero meters each app per connected organisation: **60 calls a minute**, **1,000 a day** for an app
+on Xero's Starter tier and **5,000 a day** on the Core tier and above (the tier is the app's, not
+the customer's pricing plan, and certification does not change it), and **no more than 5 requests in
+flight**, with 10,000 calls a minute across every organisation the app is connected to. Those are
+yours alone; another app your customer has connected spends its own allowance, so the only way to
+run out is to spend it yourself, and a full walk of a few years of bank transactions can. Read the
+day's remaining count from the response headers rather than assuming the figure.
 
 The bundled `HttpClient` honours `Retry-After` exactly, backs off 5xx with full jitter, never retries
-a 4xx, and surfaces `X-MinLimit-Remaining` / `X-DayLimit-Remaining`. It does not protect you from
-running twenty sync workers at once, so keep queue concurrency modest.
+a 4xx, and surfaces `X-MinLimit-Remaining` / `X-DayLimit-Remaining` to every listener registered with
+`afterResponse()`. Bind a `RequestGate` to spend the allowance deliberately: it is asked before every
+attempt, retries included, and may block briefly or throw `RateLimitException` without a request
+being made; its `release()` is called for every admitted attempt that ended in a transport failure
+rather than a response, so a slot reserved per attempt is handed back. The Laravel provider builds the client over Guzzle with `timeout` and `connect_timeout`
+from `accounting-connector.http`, because a discovered client waits forever. None of this protects
+you from running twenty sync workers at once, so keep queue concurrency modest too.
 
 ## No vendored SDKs
 

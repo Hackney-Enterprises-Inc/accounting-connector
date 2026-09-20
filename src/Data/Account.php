@@ -31,6 +31,12 @@ final readonly class Account implements LookupRecord
         public ?string $reference = null,
         public ?string $currency = null,
         public ?string $bankAccountNumber = null,
+        /**
+         * Xero's system account marker (DEBTORS, CREDITORS, GST, ...) when the account
+         * is one Xero manages itself. A host offering accounts as a holding set or a
+         * rule target has to be able to leave these out.
+         */
+        public ?string $systemAccount = null,
     ) {}
 
     /**
@@ -66,6 +72,16 @@ final readonly class Account implements LookupRecord
     }
 
     /**
+     * Whether the provider manages this account itself.
+     *
+     * Xero returns the marker as "" or null on ordinary accounts; both read as no.
+     */
+    public function isSystem(): bool
+    {
+        return $this->systemAccount !== null && $this->systemAccount !== '';
+    }
+
+    /**
      * Narrow a list of accounts to one classification.
      *
      * @param  array<int, self>  $accounts
@@ -93,6 +109,7 @@ final readonly class Account implements LookupRecord
             'reference' => $this->lineReference(),
             'currency' => $this->currency,
             'bank_account_number' => $this->bankAccountNumber,
+            'system_account' => $this->systemAccount,
         ];
     }
 
@@ -110,6 +127,7 @@ final readonly class Account implements LookupRecord
             reference: isset($data['reference']) ? (string) $data['reference'] : null,
             currency: isset($data['currency']) ? (string) $data['currency'] : null,
             bankAccountNumber: isset($data['bank_account_number']) ? (string) $data['bank_account_number'] : null,
+            systemAccount: isset($data['system_account']) && $data['system_account'] !== '' ? (string) $data['system_account'] : null,
         );
     }
 }

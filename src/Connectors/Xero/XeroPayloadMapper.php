@@ -95,7 +95,9 @@ final class XeroPayloadMapper
     public function expense(ExpenseData $expense, string $contactId, string $bankAccountId): array
     {
         $payload = [
-            'Type' => 'SPEND',
+            // SPEND for money out, RECEIVE for a refund or credit back in. The amounts
+            // are positive either way; the type is the sign.
+            'Type' => $expense->direction->bankTransactionType()->value,
             'Contact' => ['ContactID' => $contactId],
             'Date' => XeroDate::toXero($expense->date),
             'BankAccount' => ['AccountID' => $bankAccountId],

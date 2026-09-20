@@ -208,7 +208,7 @@ final class QuickBooksConnector extends AbstractConnector
     {
         return $this->lookup(
             $connection,
-            'chart_of_accounts',
+            self::LOOKUP_CHART_OF_ACCOUNTS,
             $forceRefresh,
             // 1000 is Intuit's page ceiling. A company with more active accounts
             // than that would need startposition paging; none of ours is close, so
@@ -412,6 +412,8 @@ final class QuickBooksConnector extends AbstractConnector
                 /** @var ExpenseData $expense */
                 $expense = $this->as($payload, ExpenseData::class);
                 $this->assertPaymentType($expense->paymentMethod);
+                $this->assertMoneyOut($expense);
+
                 $account = $expense->bankAccount ?? $connection->setting('bank_account');
 
                 if (! is_string($account) || $account === '') {
@@ -498,6 +500,12 @@ final class QuickBooksConnector extends AbstractConnector
     ): bool {
         [$path, $key] = $this->resourceFor($type);
 
+        // What can be refused from the payload alone is refused before the read
+        // below, so a refund never costs a request.
+        if ($type === EntityType::Expense && $payload instanceof ExpenseData) {
+            $this->assertMoneyOut($payload);
+        }
+
         // Intuit's update is a full replace and demands the current SyncToken as an
         // optimistic lock. Reading it first is not optional: a stale token is a 400,
         // and guessing zero silently clobbers a concurrent edit.
@@ -560,6 +568,7 @@ final class QuickBooksConnector extends AbstractConnector
             ],
             $body,
             $this->provider(),
+            $connection->tenantId,
         );
 
         if ($response->failed()) {
@@ -732,6 +741,7 @@ final class QuickBooksConnector extends AbstractConnector
                 /** @var ExpenseData $expense */
                 $expense = $this->as($payload, ExpenseData::class);
                 $this->assertPaymentType($expense->paymentMethod);
+                $this->assertMoneyOut($expense);
                 $account = $expense->bankAccount ?? $connection->setting('bank_account');
 
                 if (! is_string($account) || $account === '') {
@@ -943,6 +953,23 @@ final class QuickBooksConnector extends AbstractConnector
      * Intuit's own refusal for a bad PaymentType is a generic validation fault that
      * does not name the field or the allowed values.
      */
+    /**
+     * A Purchase is money out by definition. Posting a refund as one, on a create
+     * or on an update, would record the money leaving twice; refusing is the
+     * honest answer until a Deposit mapping exists.
+     *
+     * @throws InvalidPayloadException
+     */
+    private function assertMoneyOut(ExpenseData $expense): void
+    {
+        if ($expense->direction->isIn()) {
+            throw new InvalidPayloadException(
+                'QuickBooks has no money-in purchase; a RECEIVE expense cannot be posted here.',
+                $this->provider(),
+            );
+        }
+    }
+
     private function assertPaymentType(?string $method): void
     {
         if ($method !== null && ! in_array($method, ['Cash', 'Check', 'CreditCard'], true)) {
@@ -1011,6 +1038,7 @@ final class QuickBooksConnector extends AbstractConnector
             ],
             null,
             $this->provider(),
+            $connection->tenantId,
         );
     }
 
@@ -1040,6 +1068,7 @@ final class QuickBooksConnector extends AbstractConnector
             ],
             json_encode($body, JSON_THROW_ON_ERROR),
             $this->provider(),
+            $connection->tenantId,
         );
     }
 

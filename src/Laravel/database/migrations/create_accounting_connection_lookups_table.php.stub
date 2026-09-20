@@ -34,7 +34,7 @@ return new class extends Migration
             $table->string('owner_id', 191);
             $table->string('provider', 32);
 
-            // 'chart_of_accounts', 'tax_codes', 'tracking_categories'.
+            // AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS, 'tax_codes', 'tracking_categories'.
             $table->string('lookup_key', 64);
 
             $table->json('payload');

@@ -10,17 +10,20 @@ use DateTimeZone;
 use Hei\AccountingConnector\Connectors\AbstractConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
+use Hei\AccountingConnector\Contracts\FindsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
 use Hei\AccountingConnector\Data\AuthorizationResult;
+use Hei\AccountingConnector\Data\BankTransactionChange;
 use Hei\AccountingConnector\Data\BankTransactionData;
 use Hei\AccountingConnector\Data\BankTransactionLine;
 use Hei\AccountingConnector\Data\BankTransactionPage;
 use Hei\AccountingConnector\Data\BankTransactionQuery;
 use Hei\AccountingConnector\Data\BillData;
 use Hei\AccountingConnector\Data\Connection;
+use Hei\AccountingConnector\Data\Contact;
 use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\ExpenseData;
 use Hei\AccountingConnector\Data\InvoiceData;
@@ -29,6 +32,8 @@ use Hei\AccountingConnector\Data\LineCoding;
 use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\PaymentData;
 use Hei\AccountingConnector\Data\RawPayload;
+use Hei\AccountingConnector\Data\RecodeExpectation;
+use Hei\AccountingConnector\Data\RecodeResult;
 use Hei\AccountingConnector\Data\TaxCode;
 use Hei\AccountingConnector\Data\TenantInfo;
 use Hei\AccountingConnector\Data\TokenSet;
@@ -38,16 +43,20 @@ use Hei\AccountingConnector\Data\TrackingRef;
 use Hei\AccountingConnector\Enums\AccountClass;
 use Hei\AccountingConnector\Enums\BankTransactionType;
 use Hei\AccountingConnector\Enums\EntityType;
+use Hei\AccountingConnector\Enums\LineAmountType;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\AccountingConnectorException;
 use Hei\AccountingConnector\Exceptions\AuthenticationException;
 use Hei\AccountingConnector\Exceptions\ConnectionRevokedException;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
+use Hei\AccountingConnector\Exceptions\PreconditionFailedException;
+use Hei\AccountingConnector\Exceptions\RecodeMovedMoneyException;
 use Hei\AccountingConnector\Exceptions\UnsupportedEntityTypeException;
 use Hei\AccountingConnector\Exceptions\ValidationException;
 use Hei\AccountingConnector\Http\HttpResponse;
 use Hei\AccountingConnector\Support\Filename;
+use Hei\AccountingConnector\Support\RecodeInvariants;
 
 /**
  * Xero, over its plain JSON REST API.
@@ -57,14 +66,14 @@ use Hei\AccountingConnector\Support\Filename;
  * API still answers in XML by default, `Idempotency-Key` on creates, and raw bytes
  * with `Content-Type: application/octet-stream` for attachments.
  *
- * Rate limits worth designing around, all per tenant: 60 calls a minute, 5,000 a
- * day once the app is certified and 1,000 before that, and no more than 5 requests
- * in flight at once. The per-minute ceiling is shared with every other app the
- * customer has connected, so a busy organization can rate-limit us through no fault
- * of ours. HttpClient honours Retry-After; the host still needs to keep its queue
- * concurrency modest.
+ * Rate limits worth designing around, each measured per app per connected
+ * organisation: 60 calls a minute, 5,000 a day once the app is certified and 1,000
+ * before that, and no more than 5 requests in flight at once. They are ours alone;
+ * another app the customer has connected spends its own allowance, not this one.
+ * HttpClient honours Retry-After and asks a RequestGate before every attempt; the
+ * host still needs to keep its queue concurrency modest and to budget a long walk.
  */
-final class XeroConnector extends AbstractConnector implements CodesBankTransactions, ReadsBankTransactions
+final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, ReadsBankTransactions
 {
     public const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 
@@ -73,6 +82,15 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
     public const CONNECTIONS_URL = 'https://api.xero.com/connections';
 
     public const API_BASE = 'https://api.xero.com/api.xro/2.0';
+
+    /**
+     * The query every bank transaction read AND write carries. Xero rounds unit
+     * amounts to two places unless asked for four, on the way out and on the way
+     * in, and a price rounded to cents times a quantity is a different line.
+     *
+     * @var array<string, int>
+     */
+    private const UNIT_DP = ['unitdp' => 4];
 
     /**
      * Xero caps an attachment at 10 MB, and rejects anything larger outright.
@@ -93,9 +111,35 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
     private ?XeroPayloadMapper $mapper = null;
 
+    /**
+     * Rows per page when a query does not say. See BankTransactionQuery::DEFAULT_PAGE_SIZE
+     * for why the default is the documented figure rather than the spec's.
+     */
+    private int $bankTransactionPageSize = BankTransactionQuery::DEFAULT_PAGE_SIZE;
+
     public function provider(): Provider
     {
         return Provider::Xero;
+    }
+
+    /**
+     * Rows per bank transaction page when a query leaves it unset.
+     *
+     * Fluent rather than a constructor argument so the constructor stays inherited.
+     */
+    public function usingBankTransactionPageSize(int $pageSize): self
+    {
+        if ($pageSize < 1 || $pageSize > BankTransactionQuery::MAX_PAGE_SIZE) {
+            throw new InvalidPayloadException(sprintf(
+                'A bank transaction page size must be between 1 and %d, got %d.',
+                BankTransactionQuery::MAX_PAGE_SIZE,
+                $pageSize,
+            ), $this->provider());
+        }
+
+        $this->bankTransactionPageSize = $pageSize;
+
+        return $this;
     }
 
     public function supports(EntityType $type): bool
@@ -251,7 +295,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
         // customer shares with every other app they have connected.
         return $this->lookup(
             $connection,
-            'chart_of_accounts',
+            self::LOOKUP_CHART_OF_ACCOUNTS,
             $forceRefresh,
             fn (): array => $this->fetchAccounts($connection),
             fn (array $row): Account => Account::fromArray($row),
@@ -528,6 +572,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             ],
             $attachment->contents,
             $this->provider(),
+            $connection->tenantId,
         );
 
         if ($response->failed()) {
@@ -750,6 +795,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
                 reference: $class === AccountClass::Bank ? $id : ($code ?? $id),
                 currency: isset($account['CurrencyCode']) ? (string) $account['CurrencyCode'] : null,
                 bankAccountNumber: isset($account['BankAccountNumber']) ? (string) $account['BankAccountNumber'] : null,
+                systemAccount: isset($account['SystemAccount']) && $account['SystemAccount'] !== '' ? (string) $account['SystemAccount'] : null,
             );
         }
 
@@ -925,16 +971,30 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
     /**
      * One page of bank transactions, filtered at Xero rather than here.
      *
-     * A company with a live bank feed holds tens of thousands of these and the
-     * per-tenant ceiling is sixty calls a minute shared with every other app the
-     * customer has connected, so everything the caller asked to narrow by becomes
-     * part of the `where` expression and the modified-since instant becomes a header.
+     * A company with a live bank feed holds tens of thousands of these and this app
+     * is allowed sixty calls a minute and five thousand a day against each
+     * organisation, so everything the caller asked to narrow by becomes part of the
+     * `where` expression and the modified-since instant becomes a header.
+     *
+     * Every read asks for `unitdp=4`. Xero rounds unit amounts to two places unless
+     * told otherwise, and a line read at two places cannot be sent back without
+     * moving the money on a transaction whose unit price had four.
      */
     public function listBankTransactions(Connection $connection, BankTransactionQuery $query): BankTransactionPage
     {
         $connection = $this->fresh($connection);
 
-        $parameters = ['page' => max(1, $query->page)];
+        $pageSize = $query->effectivePageSize($this->bankTransactionPageSize);
+
+        $parameters = [
+            'page' => $query->page,
+            'pageSize' => $pageSize,
+        ] + self::UNIT_DP;
+
+        if ($query->order !== null) {
+            $parameters['order'] = $query->order;
+        }
+
         $where = $this->bankTransactionWhere($query);
 
         if ($where !== null) {
@@ -953,7 +1013,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
          * Xero sends it when If-Modified-Since is newer than every candidate row.
          */
         if ($response->status === 304) {
-            return new BankTransactionPage([], $query->page);
+            return new BankTransactionPage([], $query->page, $pageSize);
         }
 
         if ($response->failed()) {
@@ -969,14 +1029,22 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             }
         }
 
-        return new BankTransactionPage($transactions, $query->page);
+        $count = static fn (mixed $value): ?int => is_numeric($value) ? (int) $value : null;
+
+        return new BankTransactionPage(
+            $transactions,
+            $query->page,
+            $pageSize,
+            itemCount: $count($response->get('pagination.itemCount')),
+            pageCount: $count($response->get('pagination.pageCount')),
+        );
     }
 
     public function findBankTransaction(Connection $connection, string $externalId): ?BankTransactionData
     {
         $connection = $this->fresh($connection);
 
-        $response = $this->get($connection, 'BankTransactions/'.rawurlencode($externalId));
+        $response = $this->get($connection, 'BankTransactions/'.rawurlencode($externalId), self::UNIT_DP);
 
         /*
          * Xero answers a missing bank transaction with a 404, and a host asking about
@@ -1001,21 +1069,29 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
      * Recode an existing bank transaction without disturbing anything else on it.
      *
      * Xero has no partial update: a POST to /BankTransactions replaces the whole
-     * transaction, and a field left out of the body is a field cleared. So this reads
-     * the transaction first and sends every part of it back - amounts, date, contact,
-     * bank account, reference, status - with only AccountCode and Tracking changed.
+     * transaction, and a field left out of the body is a field cleared or defaulted.
+     * So this reads the transaction first and sends every part of it back, with only
+     * the coding and, when asked, the contact changed. See {@see self::recodedBody()}
+     * for what "every part" has to include.
      *
-     * Lines are addressed by LineItemID for the same reason. Omit it and Xero deletes
-     * the line it came from and creates a new one, which loses the reconciliation
-     * Xero holds against that line id.
-     *
-     * @param  array<int, LineCoding>  $codings
+     * The three guards, in order, are the contract's: the expectation against the
+     * read, the tax guard against what Xero would recompute, and the moved-money
+     * check against what Xero answered. The first two run before any POST.
      */
-    public function updateBankTransactionCoding(
+    public function recodeBankTransaction(
         Connection $connection,
         string $externalId,
-        array $codings,
-    ): BankTransactionData {
+        BankTransactionChange $change,
+        ?RecodeExpectation $expectation = null,
+        ?string $idempotencyKey = null,
+    ): RecodeResult {
+        if ($change->isEmpty()) {
+            throw new InvalidPayloadException(
+                "A recode of {$externalId} that changes nothing was refused before any request.",
+                $this->provider(),
+            );
+        }
+
         $connection = $this->fresh($connection);
 
         $current = $this->findBankTransaction($connection, $externalId);
@@ -1027,9 +1103,52 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             );
         }
 
+        if ($expectation !== null) {
+            $differences = $expectation->differences($current);
+
+            /*
+             * The read may already show the change applied: an earlier attempt
+             * landed and its response was lost, and this is the retry the
+             * idempotency key exists for. Judged strictly: every line the change
+             * targets carries what the change sets, every other line still carries
+             * what the expectation says, and the provider's stamp has moved on, not
+             * back. Then nothing is sent and the read is the result. A person who
+             * coded the line to the very same account in between is indistinguishable
+             * from that and is treated the same way.
+             */
+            if ($differences !== [] && $this->alreadyLanded($expectation, $change, $current)) {
+                return new RecodeResult(
+                    $current->withAccountCodes($expectation->accountCodesByLine, $expectation->updatedDateUtc),
+                    $current,
+                    recovered: true,
+                );
+            }
+
+            if ($differences !== []) {
+                throw new PreconditionFailedException(
+                    sprintf(
+                        'The bank transaction %s changed since the recode was decided: %s.',
+                        $externalId,
+                        implode('; ', $differences),
+                    ),
+                    $current,
+                    $differences,
+                    $this->provider(),
+                );
+            }
+        }
+
+        $this->refuseWhenTaxWouldMove($connection, $current);
+        $type = $this->requireKnownType($current);
+
+        // unitdp=4 on the write as on the reads: without it Xero rounds the
+        // UnitAmount it is handed to two places before recomputing the line, so a
+        // 1.3333 read back at four places lands as 1.33 and a three-unit line moves
+        // by a cent (invariant 15). The row Xero answers with comes back at four
+        // places too, which is what the moved-money check compares.
         $response = $this->post($connection, 'BankTransactions', [
-            'BankTransactions' => [$this->recodedBody($current, $codings)],
-        ]);
+            'BankTransactions' => [$this->recodedBody($current, $change, $type)],
+        ], $idempotencyKey, self::UNIT_DP);
 
         if ($response->failed()) {
             $this->raise($response, $connection, "recoding the bank transaction {$externalId}");
@@ -1044,22 +1163,439 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             );
         }
 
-        return $this->bankTransaction($row);
+        $after = $this->bankTransaction($row);
+        $moved = RecodeInvariants::movedMoney($current, $after);
+
+        if ($moved !== []) {
+            throw new RecodeMovedMoneyException(
+                sprintf('Recoding the bank transaction %s moved money: %s.', $externalId, implode('; ', $moved)),
+                $current,
+                $after,
+                $moved,
+                $this->provider(),
+            );
+        }
+
+        return new RecodeResult($current, $after);
+    }
+
+    /**
+     * The original coding-only write, kept as a wrapper with no expectation.
+     *
+     * @param  array<int, LineCoding>  $codings
+     */
+    public function updateBankTransactionCoding(
+        Connection $connection,
+        string $externalId,
+        array $codings,
+    ): BankTransactionData {
+        return $this->recodeBankTransaction($connection, $externalId, new BankTransactionChange($codings))->after;
+    }
+
+    /**
+     * Delete a spend or receive money transaction, and say what Xero holds now.
+     *
+     * Xero deletes these by status: a POST to the transaction's own URL with
+     * `Status: DELETED` (the status-codes page lists only AUTHORISED and DELETED
+     * for bank transactions; VOIDED belongs to the prepayment and overpayment
+     * variants). What a GET returns afterwards, a 404 or the row with its new
+     * status, is not documented; either way the answer here is a transaction whose
+     * status is DELETED, so a host has one shape to test against. A transaction
+     * that is already gone when the POST is made is the same answer: a 404 on the
+     * delete is "done", not an error, because the host asking is asking precisely
+     * because it may have been deleted in Xero already.
+     *
+     * Nothing here checks reconciliation or who created the transaction; those are
+     * the host's invariants, checked against a fresh read before it calls this.
+     */
+    public function deleteBankTransaction(Connection $connection, string $externalId, ?string $idempotencyKey = null): BankTransactionData
+    {
+        if (trim($externalId) === '') {
+            throw new InvalidPayloadException('A bank transaction id is needed to delete one.', $this->provider());
+        }
+
+        $connection = $this->fresh($connection);
+
+        $response = $this->post(
+            $connection,
+            'BankTransactions/'.rawurlencode($externalId),
+            ['BankTransactions' => [['BankTransactionID' => $externalId, 'Status' => 'DELETED']]],
+            $idempotencyKey,
+            self::UNIT_DP,
+        );
+
+        if ($response->status === 404) {
+            return $this->deletedPlaceholder($externalId);
+        }
+
+        if ($response->failed()) {
+            $this->raise($response, $connection, "deleting the bank transaction {$externalId}");
+        }
+
+        $row = $response->get('BankTransactions.0');
+        $after = is_array($row) ? $this->bankTransaction($row) : $this->findBankTransaction($connection, $externalId);
+
+        if ($after === null) {
+            return $this->deletedPlaceholder($externalId);
+        }
+
+        if (! in_array(strtoupper((string) $after->status), ['DELETED', 'VOIDED'], true)) {
+            throw new ValidationException(
+                sprintf(
+                    'Xero accepted the delete of the bank transaction %s but still reports it as %s.',
+                    $externalId,
+                    $after->status ?? 'unknown',
+                ),
+                $this->provider(),
+            );
+        }
+
+        return $after;
+    }
+
+    /**
+     * What a transaction Xero no longer returns looks like to a host: gone, by id.
+     */
+    private function deletedPlaceholder(string $externalId): BankTransactionData
+    {
+        return new BankTransactionData(
+            id: $externalId,
+            type: null,
+            date: null,
+            total: Money::zero(),
+            status: 'DELETED',
+        );
+    }
+
+    /**
+     * The contact with exactly this name, without creating one.
+     *
+     * The same lookup {@see self::resolveContact()} makes before it creates, minus
+     * the create and minus the entity map: a match wants the customer's own answer,
+     * not a mapping a post made earlier.
+     */
+    public function findContactByName(Connection $connection, string $name): ?Contact
+    {
+        $name = trim($name);
+
+        // Xero's where clause has no escape syntax, so a name with a double quote
+        // cannot be asked for safely. Unknown, not found.
+        if ($name === '' || str_contains($name, '"')) {
+            return null;
+        }
+
+        $connection = $this->fresh($connection);
+
+        $response = $this->get($connection, 'Contacts', ['where' => 'Name=="'.$name.'"']);
+
+        if ($response->failed()) {
+            $this->raise($response, $connection, "the contact lookup for '{$name}'");
+        }
+
+        $row = $response->get('Contacts.0');
+
+        if (! is_array($row)) {
+            return null;
+        }
+
+        $id = $row['ContactID'] ?? null;
+
+        if (! is_string($id) || $id === '') {
+            return null;
+        }
+
+        return new Contact(
+            id: $id,
+            name: (string) ($row['Name'] ?? $name),
+            status: isset($row['ContactStatus']) ? (string) $row['ContactStatus'] : null,
+            isSupplier: (bool) ($row['IsSupplier'] ?? false),
+            isCustomer: (bool) ($row['IsCustomer'] ?? false),
+        );
+    }
+
+    /**
+     * Refuse a write Xero would turn into different money.
+     *
+     * Two things Xero does on a bank transaction POST that a recode cannot argue
+     * with: it defaults an omitted LineAmountTypes to Inclusive, and it ignores a
+     * supplied line TaxAmount and recomputes the tax from the rate. The first is
+     * handled by never omitting the mode, which needs the read to have carried one.
+     * The second cannot be handled at all: a tax somebody adjusted by hand is lost
+     * the moment anything is POSTed, so the only way to keep it is not to write.
+     *
+     * "Adjusted by hand" is detected as a line whose tax differs from what its rate
+     * would produce by more than a cent. The rate comes from the tax lookup, which
+     * is cached; a taxed line whose rate the lookup does not know cannot be proved
+     * untouched and is refused too, with its own reason.
+     *
+     * @throws ValidationException with a REASON_* reason
+     */
+    private function refuseWhenTaxWouldMove(Connection $connection, BankTransactionData $current): void
+    {
+        if ($current->lineAmountType === null) {
+            throw new ValidationException(
+                "The bank transaction {$current->id} carries no LineAmountTypes, so a recode could not send its tax mode back and Xero would assume Inclusive.",
+                $this->provider(),
+                reason: ValidationException::REASON_TAX_MODE_UNKNOWN,
+            );
+        }
+
+        $rates = null;
+
+        foreach ($current->lines as $index => $line) {
+            $tax = $line->taxAmount === null ? 0 : $line->taxAmount->amount;
+            $lineAmount = $this->lineAmountCents($line);
+
+            if ($current->lineAmountType === LineAmountType::NoTax || $line->taxType === null || $line->taxType === 'NONE') {
+                if ($tax === 0) {
+                    continue;
+                }
+
+                $this->refuseTaxOverride($current, $line, $index, 0, $tax);
+            }
+
+            if ($lineAmount === null) {
+                // Neither a line amount nor a quantity and unit price: nothing to
+                // compare, and nothing Xero could recompute from either.
+                continue;
+            }
+
+            $rates ??= $this->taxRatesByType(
+                $connection,
+                array_map(static fn (BankTransactionLine $each): ?string => $each->taxType, $current->lines),
+            );
+
+            if (! array_key_exists($line->taxType, $rates)) {
+                if ($tax === 0) {
+                    continue;
+                }
+
+                throw new ValidationException(
+                    sprintf(
+                        'Line %s of the bank transaction %s is taxed as %s, which neither the active nor the archived tax rates know, so its tax cannot be proved untouched.',
+                        $line->lineItemId ?? '#'.$index,
+                        $current->id,
+                        $line->taxType,
+                    ),
+                    $this->provider(),
+                    reason: ValidationException::REASON_TAX_RATE_UNKNOWN,
+                );
+            }
+
+            $rate = $rates[$line->taxType];
+
+            /*
+             * What Xero will compute on the write, in whole cents. Exact: a stored
+             * tax a cent away from the recomputation is exactly the case a write
+             * would "correct", moving the total by that cent, and the moved-money
+             * check afterwards would only report what had already landed. A line
+             * whose stored tax sits on a half-cent Xero rounded the other way is
+             * refused with it, which is the safe side; the contract suite is the
+             * place to pin Xero's rounding rule if that ever bites.
+             */
+            $expected = $current->lineAmountType === LineAmountType::Inclusive
+                ? (int) round($lineAmount * $rate / (100 + $rate))
+                : (int) round($lineAmount * $rate / 100);
+
+            if ($expected !== $tax) {
+                $this->refuseTaxOverride($current, $line, $index, $expected, $tax);
+            }
+        }
+    }
+
+    /**
+     * The transaction's type, which the replacing write has to send back as it is,
+     * and which has to be one a recode may touch at all.
+     *
+     * A type this build has no case for reads back as null; there is no honest
+     * value to send in its place (a default of SPEND would turn a money-in line
+     * into money out), so the recode is refused before any request. A recognised
+     * type that is not SPEND or RECEIVE (a transfer, overpayment or prepayment
+     * leg) is refused too: nothing is ever matched to one, and recoding one is
+     * outside what this package does to a customer's books.
+     *
+     * @throws ValidationException
+     */
+    private function requireKnownType(BankTransactionData $current): BankTransactionType
+    {
+        if (! $current->type instanceof BankTransactionType) {
+            throw new ValidationException(
+                "The bank transaction {$current->id} is of a type this connector does not know, so a recode could not send it back unchanged.",
+                $this->provider(),
+                reason: ValidationException::REASON_TYPE_UNKNOWN,
+            );
+        }
+
+        if (! $current->type->isMatchable()) {
+            throw new ValidationException(
+                "The bank transaction {$current->id} is a {$current->type->value}; only SPEND and RECEIVE transactions are recoded.",
+                $this->provider(),
+                reason: ValidationException::REASON_TYPE_NOT_RECODABLE,
+            );
+        }
+
+        return $current->type;
+    }
+
+    /**
+     * Whether a fresh read is exactly the state the change would have produced
+     * from the expected one: an earlier write that landed.
+     */
+    private function alreadyLanded(RecodeExpectation $expectation, BankTransactionChange $change, BankTransactionData $current): bool
+    {
+        if (! $change->isSatisfiedBy($current)) {
+            return false;
+        }
+
+        if ($change->codesAfter($expectation->accountCodesByLine) !== $current->accountCodesByLine()) {
+            return false;
+        }
+
+        // The stamp must not have gone backwards; equal or missing is fine (a
+        // provider or a fixture that omits it cannot be held to it).
+        if ($expectation->updatedDateUtc !== null && $current->updatedDateUtc !== null
+            && $current->updatedDateUtc < $expectation->updatedDateUtc) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * @throws ValidationException
+     */
+    private function refuseTaxOverride(BankTransactionData $current, BankTransactionLine $line, int $index, int $expected, int $actual): never
+    {
+        throw new ValidationException(
+            sprintf(
+                'Line %s of the bank transaction %s carries tax of %s where its rate gives %s; Xero would recompute it on any write, so the recode was refused.',
+                $line->lineItemId ?? '#'.$index,
+                $current->id,
+                number_format($actual / 100, 2, '.', ''),
+                number_format($expected / 100, 2, '.', ''),
+            ),
+            $this->provider(),
+            reason: ValidationException::REASON_TAX_OVERRIDE_WOULD_BE_LOST,
+        );
+    }
+
+    /**
+     * The line's amount in cents, from the line amount or from quantity times the exact unit price.
+     */
+    private function lineAmountCents(BankTransactionLine $line): ?int
+    {
+        if ($line->lineAmount !== null) {
+            return $line->lineAmount->amount;
+        }
+
+        if ($line->quantity !== null && $line->unitAmountExact !== null && is_numeric($line->unitAmountExact)) {
+            return (int) round($line->quantity * (float) $line->unitAmountExact * 100);
+        }
+
+        return null;
+    }
+
+    /**
+     * Tax rates by TaxType, as percentages, active ones first and archived ones on demand.
+     *
+     * The active lookup is what a settings page needs and is already cached. A
+     * catch-up transaction is routinely coded with a rate the customer has since
+     * archived, and refusing to recode exactly those lines would defeat the point,
+     * so when a type is missing from the active set the archived set is fetched
+     * (and cached) before the line is given up on.
+     *
+     * @param  array<int, string|null>  $wanted  The TaxTypes the guard needs, so the archived call is made only when one is missing.
+     * @return array<string, float>
+     */
+    private function taxRatesByType(Connection $connection, array $wanted): array
+    {
+        $rates = [];
+
+        foreach ($this->taxCodes($connection) as $code) {
+            $rates[$code->reference] = $code->rate;
+        }
+
+        foreach ($wanted as $type) {
+            if ($type === null || array_key_exists($type, $rates)) {
+                continue;
+            }
+
+            foreach ($this->archivedTaxCodes($connection) as $code) {
+                $rates[$code->reference] ??= $code->rate;
+            }
+
+            break;
+        }
+
+        return $rates;
+    }
+
+    /**
+     * The rates the customer has archived, cached like the active ones.
+     *
+     * @return array<int, TaxCode>
+     */
+    private function archivedTaxCodes(Connection $connection): array
+    {
+        return $this->lookup($connection, 'tax_codes_archived', false, function () use ($connection): array {
+            $connection = $this->fresh($connection);
+            $response = $this->get($connection, 'TaxRates', ['where' => 'Status=="ARCHIVED"']);
+
+            if ($response->failed()) {
+                $this->raise($response, $connection, 'the archived tax rate lookup');
+            }
+
+            $codes = [];
+
+            foreach ($this->rowsOf($response->get('TaxRates', [])) as $rate) {
+                $codes[] = new TaxCode(
+                    reference: (string) ($rate['TaxType'] ?? ''),
+                    name: (string) ($rate['Name'] ?? ''),
+                    rate: (float) ($rate['EffectiveRate'] ?? $rate['DisplayTaxRate'] ?? 0),
+                );
+            }
+
+            return $codes;
+        }, fn (array $row): TaxCode => TaxCode::fromArray($row));
+    }
+
+    /**
+     * The array rows of a provider list, skipping anything that is not one.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function rowsOf(mixed $rows): array
+    {
+        $out = [];
+
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            if (is_array($row)) {
+                $out[] = $row;
+            }
+        }
+
+        return $out;
     }
 
     /**
      * The full replacement body for a transaction whose coding is changing.
      *
-     * @param  array<int, LineCoding>  $codings
+     * Everything the read carried goes back, because a POST replaces the transaction
+     * and Xero fills what is missing with defaults that move money: an omitted
+     * LineAmountTypes is read as Inclusive, an omitted CurrencyRate is recomputed
+     * from the day's rate, an omitted ItemCode is cleared. The tax mode is never
+     * defaulted here; a read without one was refused before this runs.
+     *
      * @return array<string, mixed>
      */
-    private function recodedBody(BankTransactionData $current, array $codings): array
+    private function recodedBody(BankTransactionData $current, BankTransactionChange $change, BankTransactionType $type): array
     {
         $body = [
             'BankTransactionID' => $current->id,
-            'Type' => $current->type->value ?? BankTransactionType::Spend->value,
+            'Type' => $type->value,
+            'LineAmountTypes' => ($current->lineAmountType ?? LineAmountType::Inclusive)->toXero(),
             'LineItems' => array_map(
-                fn (BankTransactionLine $line): array => $this->recodedLine($line, $codings),
+                fn (BankTransactionLine $line): array => $this->recodedLine($line, $change->codings),
                 $current->lines,
             ),
         ];
@@ -1068,8 +1604,10 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             $body['BankAccount'] = ['AccountID' => $current->bankAccountId];
         }
 
-        if ($current->contactId !== null) {
-            $body['Contact'] = ['ContactID' => $current->contactId];
+        $contactId = $change->contactId ?? $current->contactId;
+
+        if ($contactId !== null && $contactId !== '') {
+            $body['Contact'] = ['ContactID' => $contactId];
         }
 
         if ($current->date !== null) {
@@ -1086,6 +1624,10 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
         if ($current->currency !== null) {
             $body['CurrencyCode'] = $current->currency;
+        }
+
+        if ($current->currencyRate !== null) {
+            $body['CurrencyRate'] = $current->currencyRate;
         }
 
         return $body;
@@ -1128,14 +1670,19 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
         /*
          * Amounts go back exactly as they came. Xero recomputes LineAmount from
-         * Quantity times UnitAmount when both are present, so sending all three of a
-         * transaction it produced itself is the one way to be sure nothing moves.
+         * Quantity times UnitAmount when both are present, so the unit price goes
+         * back at the precision it was read at (four places, see the reads), not
+         * rounded to cents; a price rounded to cents times a quantity is a different
+         * line. TaxAmount is deliberately absent: Xero ignores it on this endpoint,
+         * and a line whose tax it would recompute differently was refused earlier.
          */
         if ($line->quantity !== null) {
             $body['Quantity'] = $line->quantity;
         }
 
-        if ($line->unitAmount !== null) {
+        if ($line->unitAmountExact !== null && is_numeric($line->unitAmountExact)) {
+            $body['UnitAmount'] = (float) $line->unitAmountExact;
+        } elseif ($line->unitAmount !== null) {
             $body['UnitAmount'] = $line->unitAmount->toDecimal();
         }
 
@@ -1145,6 +1692,10 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
         if ($line->taxType !== null) {
             $body['TaxType'] = $line->taxType;
+        }
+
+        if ($line->itemCode !== null) {
+            $body['ItemCode'] = $line->itemCode;
         }
 
         if ($accountCode !== null && $accountCode !== '') {
@@ -1258,6 +1809,8 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             hasAttachments: (bool) ($row['HasAttachments'] ?? false),
             lines: $lines,
             updatedDateUtc: XeroDate::parse($string($row['UpdatedDateUTC'] ?? null)),
+            lineAmountType: LineAmountType::fromXero($string($row['LineAmountTypes'] ?? null)),
+            currencyRate: is_numeric($row['CurrencyRate'] ?? null) ? (float) $row['CurrencyRate'] : null,
         );
     }
 
@@ -1303,7 +1856,32 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             accountId: $string($line['AccountID'] ?? null),
             taxType: $string($line['TaxType'] ?? null),
             tracking: $tracking,
+            // The wire figure verbatim, so a four-place unit price survives the
+            // round trip that Money, in cents, cannot carry.
+            unitAmountExact: is_numeric($line['UnitAmount'] ?? null) ? $this->decimalString($line['UnitAmount']) : null,
+            taxAmount: $money($line['TaxAmount'] ?? null),
+            itemCode: $string($line['ItemCode'] ?? null),
         );
+    }
+
+    /**
+     * A JSON number as a decimal string with no exponent and no float noise.
+     */
+    private function decimalString(mixed $value): string
+    {
+        if (is_int($value)) {
+            return (string) $value;
+        }
+
+        if (is_float($value)) {
+            // Four places is the most Xero stores for a unit amount; trailing zeros
+            // go so 42.5000 and 42.5 read as the same figure.
+            $formatted = rtrim(rtrim(number_format($value, 4, '.', ''), '0'), '.');
+
+            return $formatted === '' || $formatted === '-' ? '0' : $formatted;
+        }
+
+        return (string) $value;
     }
 
     private function mapper(): XeroPayloadMapper
@@ -1325,13 +1903,14 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             $url .= '?'.http_build_query($query);
         }
 
-        return $this->http->send('GET', $url, $headers + $this->headers($connection), null, $this->provider());
+        return $this->http->send('GET', $url, $headers + $this->headers($connection), null, $this->provider(), $connection->tenantId);
     }
 
     /**
      * @param  array<string, mixed>  $body
+     * @param  array<string, mixed>  $query
      */
-    private function post(Connection $connection, string $resource, array $body, ?string $idempotencyKey = null): HttpResponse
+    private function post(Connection $connection, string $resource, array $body, ?string $idempotencyKey = null, array $query = []): HttpResponse
     {
         $headers = $this->headers($connection) + ['Content-Type' => 'application/json'];
 
@@ -1339,12 +1918,19 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             $headers['Idempotency-Key'] = $idempotencyKey;
         }
 
+        $url = self::API_BASE.'/'.$resource;
+
+        if ($query !== []) {
+            $url .= '?'.http_build_query($query);
+        }
+
         return $this->http->send(
             'POST',
-            self::API_BASE.'/'.$resource,
+            $url,
             $headers,
             json_encode($body, JSON_THROW_ON_ERROR),
             $this->provider(),
+            $connection->tenantId,
         );
     }
 

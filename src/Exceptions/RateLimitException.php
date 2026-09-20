@@ -7,13 +7,15 @@ namespace Hei\AccountingConnector\Exceptions;
 use Hei\AccountingConnector\Enums\Provider;
 
 /**
- * The provider rate-limited us and the retry budget ran out.
+ * The provider rate-limited us and the retry budget ran out, or a RequestGate
+ * refused the request before it was made.
  *
- * Xero's limits are per tenant: 60 calls a minute, 5,000 a day once the app is
- * certified (1,000 before), and no more than 5 requests in flight at once. The
- * per-minute ceiling is shared across every app connected to that organization,
- * so a customer running two integrations can rate-limit us through no fault of
- * our own. Treat this as retryable on a later queue attempt, not as a failure.
+ * Xero's limits are per app per organisation: 60 calls a minute, 5,000 a day once
+ * the app is certified (1,000 before), and no more than 5 requests in flight at
+ * once. Another app the customer has connected spends its own allowance, so the
+ * only way to hit these is to spend them ourselves. Treat this as retryable on a
+ * later queue attempt, not as a failure; `providerMessage` names the limit
+ * (`minute`, `day`, `concurrent`, or a gate's own reason) when it is known.
  */
 final class RateLimitException extends AccountingConnectorException
 {

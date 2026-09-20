@@ -6,6 +6,7 @@ namespace Hei\AccountingConnector\Data;
 
 use DateTimeImmutable;
 use Hei\AccountingConnector\Enums\BankTransactionType;
+use Hei\AccountingConnector\Enums\LineAmountType;
 
 /**
  * A bank transaction that already exists in the customer's books.
@@ -19,6 +20,11 @@ use Hei\AccountingConnector\Enums\BankTransactionType;
  * this boundary. `$total` is what a matcher compares a receipt against: it is the
  * gross figure including tax, which is what a bank feed line shows and therefore
  * what the receipt total should equal.
+ *
+ * `$lineAmountType` and `$currencyRate` are here for the write that reads this
+ * first. Xero replaces a transaction whole on POST, defaults an omitted tax mode to
+ * Inclusive and recomputes an omitted currency rate, so a recode that did not carry
+ * them back would move the money it was told not to touch.
  */
 final readonly class BankTransactionData
 {
@@ -43,6 +49,10 @@ final readonly class BankTransactionData
         public bool $hasAttachments = false,
         public array $lines = [],
         public ?DateTimeImmutable $updatedDateUtc = null,
+        /** Whether the line amounts include tax. Null when the provider did not say. */
+        public ?LineAmountType $lineAmountType = null,
+        /** The rate a foreign-currency transaction was booked at, when there is one. */
+        public ?float $currencyRate = null,
     ) {}
 
     /**
@@ -107,7 +117,73 @@ final readonly class BankTransactionData
             'has_attachments' => $this->hasAttachments,
             'lines' => array_map(static fn (BankTransactionLine $line): array => $line->toArray(), $this->lines),
             'updated_date_utc' => $this->updatedDateUtc?->format(DATE_ATOM),
+            'line_amount_type' => $this->lineAmountType?->value,
+            'currency_rate' => $this->currencyRate,
         ];
+    }
+
+    /**
+     * The account code on each line, keyed by line id, in line order.
+     *
+     * The shape a recode expectation compares: what a decision was made against
+     * and what the connector finds when it reads again. A line with no id is keyed
+     * by its position, so a transaction whose lines Xero has not yet numbered still
+     * compares line for line.
+     *
+     * @return array<string, string|null>
+     */
+    public function accountCodesByLine(): array
+    {
+        $codes = [];
+
+        foreach ($this->lines as $index => $line) {
+            $codes[$line->lineItemId ?? '#'.$index] = $line->accountCode;
+        }
+
+        return $codes;
+    }
+
+    /**
+     * This transaction with its lines' account codes replaced and, when given, its
+     * modification stamp: the state a decision was made against, rebuilt from the
+     * connector's later read and the expectation. Amounts are the read's own; a
+     * recode never moves them, so they are the same on both sides.
+     *
+     * @param  array<string, string|null>  $accountCodesByLine  Line id (or `#index`) to account code.
+     */
+    public function withAccountCodes(array $accountCodesByLine, ?DateTimeImmutable $updatedDateUtc = null): self
+    {
+        $lines = [];
+
+        foreach ($this->lines as $index => $line) {
+            $key = $line->lineItemId ?? '#'.$index;
+
+            $lines[] = array_key_exists($key, $accountCodesByLine)
+                ? $line->withAccountCode($accountCodesByLine[$key])
+                : $line;
+        }
+
+        return new self(
+            id: $this->id,
+            type: $this->type,
+            date: $this->date,
+            total: $this->total,
+            subTotal: $this->subTotal,
+            totalTax: $this->totalTax,
+            currency: $this->currency,
+            status: $this->status,
+            contactId: $this->contactId,
+            contactName: $this->contactName,
+            bankAccountId: $this->bankAccountId,
+            bankAccountName: $this->bankAccountName,
+            reference: $this->reference,
+            isReconciled: $this->isReconciled,
+            hasAttachments: $this->hasAttachments,
+            lines: $lines,
+            updatedDateUtc: $updatedDateUtc ?? $this->updatedDateUtc,
+            lineAmountType: $this->lineAmountType,
+            currencyRate: $this->currencyRate,
+        );
     }
 
     /**
@@ -153,6 +229,8 @@ final readonly class BankTransactionData
             hasAttachments: (bool) ($data['has_attachments'] ?? false),
             lines: $lines,
             updatedDateUtc: $date($data['updated_date_utc'] ?? null),
+            lineAmountType: isset($data['line_amount_type']) ? LineAmountType::tryFrom((string) $data['line_amount_type']) : null,
+            currencyRate: isset($data['currency_rate']) && is_numeric($data['currency_rate']) ? (float) $data['currency_rate'] : null,
         );
     }
 }

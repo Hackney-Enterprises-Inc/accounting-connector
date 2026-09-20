@@ -8,3 +8,8 @@ composer.lock
 .DS_Store
 .idea/
 .vscode/
+# Contract suite credentials and rotated tokens (composer test:contract)
+/.env.contract
+/tests/Contract/*.token.json
+/tests/Contract/.xero-token.json
+.phpunit.contract.cache

@@ -7,7 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Every bank transaction write that echoes line amounts (the recode, the delete) carries
+  `unitdp=4` like the reads, so a four-place `UnitAmount` is not rounded to cents by Xero on the
+  way in and the row it answers with compares at the same precision (invariant 15).
+- The tax guard before a recode is exact: a stored line tax that differs from the rate's
+  recomputation by any amount, a cent included, is refused with `tax_override_would_be_lost`
+  before anything is sent. The cent of slack let a write "correct" the tax and move the total.
+- `RecodeInvariants::movedMoney()` compares each line's tax amount and exact unit price as well
+  as its amount and quantity, so taxes moving between lines under unchanged header totals, or a
+  unit price the provider re-rounded, are reported as moved money.
+- A recode retried with the same expectation after a lost response no longer fails its
+  precondition: when the connector's own read already shows exactly the state the change would
+  have produced from the expected one (targeted lines coded as asked, every other line as
+  expected, the provider's stamp not gone backwards), nothing is sent and the read is returned as
+  `RecodeResult` with `recovered: true`; its `before` is the expectation laid over that read.
+  `BankTransactionChange::isSatisfiedBy()` / `codesAfter()`, `BankTransactionData::withAccountCodes()`
+  and `BankTransactionLine::withAccountCode()` are the pieces. The fake does the same.
+- The lost-response recovery is strict about reach: a change with a coding that matches no
+  line on the read (a line that is not there, or an all-lines coding on a transaction with no
+  lines) is never taken as landed (`BankTransactionChange::isSatisfiedBy()`).
+- `RecodeInvariants::movedMoney()` reports a line tax that appeared or vanished, not only one
+  that changed amount.
+- A recode of a transaction whose type the connector has no case for is refused before any
+  request with `ValidationException::REASON_TYPE_UNKNOWN` (`type_unknown`); the replacing write
+  sends the read's own type and never defaults it to SPEND. A recognised type that is not SPEND
+  or RECEIVE (a transfer, overpayment or prepayment leg) is refused with
+  `REASON_TYPE_NOT_RECODABLE` (`type_not_recodable`): only the two matchable types are ever
+  recoded (invariant 12 at the package boundary).
+- `RequestGate::observe(HttpResponse, ?Provider, ?string $tenantId)` is called by `HttpClient`
+  for every response it receives, retried 429s and 5xx included, before its own listeners; a gate
+  that throws there is logged and ignored. `NullRequestGate` implements it as a no-op. A host that
+  binds a gate no longer has to register an `afterResponse()` listener for the gate's bookkeeping.
+- `AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS` (`chart_of_accounts_v2`) is the lookup key both
+  connectors store the chart of accounts under. Versioned because rows stored before
+  `system_account` existed rehydrate without the flag; hosts reading the store must use the constant.
+- The QuickBooks connector refuses a RECEIVE expense on an update as it already did on a create,
+  before the SyncToken read.
+- `FakeConnector::flush()` also clears a queued `afterNextBankTransactionCall()` callback.
+- `CodesBankTransactions::updateBankTransactionCoding()` documents the `InvalidPayloadException`
+  it throws when the codings would change nothing.
+
 ### Added
+
+- A test that a two-line exclusive-tax bank transaction round-trips every line's Quantity,
+  UnitAmount (four places), LineAmount, TaxType and the LineAmountTypes through a recode of one
+  line and its revert, with the totals never on the wire (`XeroRecodeTest`). Nothing changed in
+  the connector; the case was the one invariant 15 of the host's plan had no proof for before
+  v0.4.0.
+- Bank transaction reads carry what a safe write needs back. `BankTransactionData` gains
+  `lineAmountType` (Xero defaults an omitted mode to Inclusive on bank transactions, so a recode
+  that dropped it moved an exclusive-tax total by the tax) and `currencyRate`;
+  `BankTransactionLine` gains `unitAmountExact` (the wire figure to four places, read with
+  `unitdp=4`, because a price rounded to cents times a quantity is a different line), `taxAmount`
+  and `itemCode`; `Account` gains `systemAccount` and `isSystem()`.
+- `CodesBankTransactions::recodeBankTransaction(Connection, string, BankTransactionChange,
+  ?RecodeExpectation, ?string $idempotencyKey): RecodeResult`, with three guards in order: an
+  expectation that disagrees with the connector's own read throws `PreconditionFailedException`
+  carrying the fresh copy and nothing is sent; a transaction whose tax mode is unknown or whose
+  line tax was adjusted by hand (the BankTransactions endpoint ignores a supplied `TaxAmount`) is
+  refused with a `ValidationException` whose new `reason` names which, and nothing is sent; after
+  the write, any moved amount throws `RecodeMovedMoneyException` with both states. An empty
+  change is refused before any request. `updateBankTransactionCoding` stays as a wrapper.
+  `BankTransactionChange` carries codings and, optionally, a contact id; `RecodeResult` carries
+  the connector's own before-state for a journal.
+- `CodesBankTransactions::deleteBankTransaction(Connection, string, ?string $idempotencyKey): BankTransactionData`,
+  a POST to the transaction's own URL with `Status: DELETED`. A 404, on the delete or on the
+  re-read the connector makes when the response carries no row, comes back as a transaction
+  with status DELETED rather than as an error, because a host deleting is often deleting
+  something already gone; a 200 that still reports the transaction AUTHORISED raises. The
+  fake sets the status, keeps the row for a later `find()`, and records `deleted[]`.
+- The recode tax guard consults the customer's ARCHIVED tax rates (a second cached lookup,
+  made only when an active rate is missing) before refusing a line as `tax_rate_unknown`,
+  because catch-up transactions are routinely coded with rates since archived.
+- `FindsContacts::findContactByName(Connection, string): ?Contact`, a read that never creates,
+  implemented by the Xero connector and the fake (`withContacts()`).
+- `BankTransactionQuery::order` and `pageSize` (default 250, configurable through
+  `accounting-connector.bank_transactions.page_size`, capped at 1000); `BankTransactionPage`
+  reads Xero's `pagination` object into `itemCount` and `pageCount` and prefers the page count
+  over the full-page heuristic. `BankTransactionType::isMatchable()` and `direction()`, and the
+  `MoneyDirection` enum: only SPEND and RECEIVE are ever match candidates.
+- `ExpenseData::direction` (`MoneyDirection`, default `Out`). `In` posts as a Xero RECEIVE with
+  the same positive amounts; the QuickBooks connector refuses it rather than posting a refund
+  as a purchase.
+- `RequestGate`, asked by `HttpClient` before every attempt, retries included, and
+  `HttpClient::afterResponse()` for the remaining-call counters; the Laravel provider binds a
+  `NullRequestGate` unless the host binds its own and builds the client over Guzzle with
+  `timeout` and `connect_timeout`. `HttpClient::send()` takes the tenant id so a gate can key
+  on it. `RequestGate::release(?Provider, ?string $tenantId, Throwable $failure)` is called for
+  every admitted attempt that produced no response (a timeout, a reset, a DNS miss), so a gate
+  that reserves an in-flight slot per attempt gets it back instead of waiting for it to expire;
+  a gate that throws from `release()` is logged and ignored.
+- `FakeConnector::afterNextBankTransactionCall(Closure)` runs a callback once, right after the
+  next bank transaction list is answered, so a test can change the books between two pages of
+  one walk and exercise a host's completeness check.
+- `FakeConnector::resolveContact()` answers the same id for the same contact within one fake,
+  as the real connectors' entity map does, so a host that asks again after a create reads the
+  id the create used.
+- `FakeConnector` orders by `Date` and `UpdatedDateUTC`, honours `pageSize`, fills the pagination
+  counts, records `changes[]` and the direction of every created expense, and gains
+  `nextRecodeReturns()` and `mutateBeforeNextRecode()` so a host can exercise the moved-money
+  and stale-expectation paths.
+
+### Changed
+
+- The rate-limit prose throughout said Xero's per-minute ceiling was shared with the customer's
+  other apps. It is not: Xero meters each app per organisation. Corrected in the connector,
+  query, lookup store, config and README.
+- Bank transaction lists send `pageSize`, `unitdp=4` and, when asked, `order`; single reads send
+  `unitdp=4`.
+
+### Previously in Unreleased
 
 - `ReadsBankTransactions`, an optional interface carrying
   `listBankTransactions(Connection, BankTransactionQuery): BankTransactionPage` and

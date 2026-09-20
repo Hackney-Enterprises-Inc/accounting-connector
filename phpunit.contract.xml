@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The contract suite: real calls to a Xero Demo Company.
+
+    A separate configuration on purpose. PHPUnit runs every testsuite listed in a
+    configuration file by default, so a `contract` suite inside phpunit.xml would run
+    under a bare `pest` or `composer test` the moment credentials were present. Kept
+    here, the only way to reach Xero is `composer test:contract`, which names this
+    file explicitly. The suite skips itself, naming the missing variable, when
+    .env.contract or the token file is absent (see tests/Contract/ContractCase.php).
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="./vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.contract.cache"
+         failOnWarning="true"
+         failOnRisky="false"
+         stopOnFailure="false">
+    <testsuites>
+        <testsuite name="contract">
+            <directory>tests/Contract</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

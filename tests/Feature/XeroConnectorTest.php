@@ -15,6 +15,7 @@ use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Data\TrackingRef;
 use Hei\AccountingConnector\Enums\EntityType;
+use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\AuthenticationException;
 use Hei\AccountingConnector\Exceptions\ConnectionRevokedException;
@@ -132,6 +133,31 @@ it('posts an expense as a SPEND bank transaction against the bank account', func
         ->and($body['Type'])->toBe('SPEND')
         ->and($body['BankAccount'])->toBe(['AccountID' => 'bank-account-1'])
         ->and($body['Status'])->toBe('AUTHORISED');
+});
+
+it('posts a refund as a RECEIVE bank transaction with the same positive amounts', function () {
+    // A credit note is money back in. The type is the sign; the amounts stay
+    // positive, which is how Xero itself records a receive-money.
+    $fake = fakeHttp();
+    $fake->queue(200, ['Contacts' => [['ContactID' => 'contact-1']]]);
+    $fake->queue(200, ['BankTransactions' => [['BankTransactionID' => 'txn-2']]]);
+
+    $refund = new ExpenseData(
+        vendor: 'Corner Store',
+        date: new DateTimeImmutable('2026-08-22'),
+        lines: [new LineItem('Refund: coffee', unitAmount: Money::cents(1250), accountCode: '400')],
+        bankAccount: 'bank-account-1',
+        direction: MoneyDirection::In,
+    );
+
+    $id = xero($fake)->createEntity(EntityType::Expense, $refund, connection());
+
+    $body = $fake->requestBody(1)['BankTransactions'][0];
+
+    expect($id)->toBe('txn-2')
+        ->and($body['Type'])->toBe('RECEIVE')
+        ->and($body['LineItems'][0]['UnitAmount'])->toEqual(12.5)
+        ->and($body['BankAccount'])->toBe(['AccountID' => 'bank-account-1']);
 });
 
 it('falls back to the connection bank account when the payload has none', function () {

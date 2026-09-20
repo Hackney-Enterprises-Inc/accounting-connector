@@ -20,6 +20,7 @@ use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Enums\AccountClass;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\LineAmountType;
+use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\ConnectionRevokedException;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
@@ -116,6 +117,46 @@ it('posts an expense as a Purchase against the payment account', function () {
         ->and($body['AccountRef'])->toBe(['value' => '35'])
         ->and($body['PaymentType'])->toBe('CreditCard')
         ->and($body['EntityRef'])->toBe(['value' => '7', 'type' => 'Vendor']);
+});
+
+it('refuses a money-in expense rather than posting a refund as a purchase', function () {
+    // A Purchase is money out by definition. Until a Deposit mapping exists the
+    // honest answer is a refusal before any call, not a second outgoing entry.
+    $fake = fakeHttp();
+
+    $refund = new ExpenseData(
+        vendor: 'Corner Store',
+        date: new DateTimeImmutable('2026-08-21'),
+        lines: [new LineItem('Refund', unitAmount: Money::cents(1250), accountCode: '63')],
+        bankAccount: '35',
+        paymentMethod: 'CreditCard',
+        direction: MoneyDirection::In,
+    );
+
+    expect(fn () => qbo($fake)->createEntity(EntityType::Expense, $refund, qboConnection()))
+        ->toThrow(InvalidPayloadException::class, 'money-in');
+
+    expect($fake->requests)->toBeEmpty();
+});
+
+it('refuses a money-in expense on an update as it does on a create', function () {
+    // The update path builds the same Purchase; it must refuse the same payload
+    // before reading the SyncToken or sending anything.
+    $fake = fakeHttp();
+
+    $refund = new ExpenseData(
+        vendor: 'Corner Store',
+        date: new DateTimeImmutable('2026-08-21'),
+        lines: [new LineItem('Refund', unitAmount: Money::cents(1250), accountCode: '63')],
+        bankAccount: '35',
+        paymentMethod: 'CreditCard',
+        direction: MoneyDirection::In,
+    );
+
+    expect(fn () => qbo($fake)->updateEntity(EntityType::Expense, '101', $refund, qboConnection()))
+        ->toThrow(InvalidPayloadException::class, 'money-in');
+
+    expect($fake->requests)->toBeEmpty();
 });
 
 it('sends the tax mode as GlobalTaxCalculation on every document', function () {

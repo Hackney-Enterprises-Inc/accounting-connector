@@ -27,6 +27,23 @@ enum LineAmountType: string
     }
 
     /**
+     * The mode a Xero response carries, or null when it carries none.
+     *
+     * Null is an answer a recode has to respect, not a value to default: Xero
+     * treats an omitted mode on a bank transaction as Inclusive, and sending an
+     * Exclusive transaction back that way moves its total by the tax.
+     */
+    public static function fromXero(?string $value): ?self
+    {
+        return match (strtolower(trim((string) $value))) {
+            'exclusive' => self::Exclusive,
+            'inclusive' => self::Inclusive,
+            'notax' => self::NoTax,
+            default => null,
+        };
+    }
+
+    /**
      * QuickBooks expresses this as a boolean GlobalTaxCalculation-adjacent flag on
      * the transaction rather than a named mode, and has no NoTax equivalent.
      */

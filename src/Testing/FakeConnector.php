@@ -4,32 +4,45 @@ declare(strict_types=1);
 
 namespace Hei\AccountingConnector\Testing;
 
+use Closure;
+use DateTimeImmutable;
 use Hei\AccountingConnector\Contracts\AccountingConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
+use Hei\AccountingConnector\Contracts\FindsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
 use Hei\AccountingConnector\Data\AttachmentSet;
 use Hei\AccountingConnector\Data\AuthorizationResult;
+use Hei\AccountingConnector\Data\BankTransactionChange;
 use Hei\AccountingConnector\Data\BankTransactionData;
 use Hei\AccountingConnector\Data\BankTransactionLine;
 use Hei\AccountingConnector\Data\BankTransactionPage;
 use Hei\AccountingConnector\Data\BankTransactionQuery;
 use Hei\AccountingConnector\Data\Connection;
+use Hei\AccountingConnector\Data\Contact;
 use Hei\AccountingConnector\Data\ContactData;
+use Hei\AccountingConnector\Data\ExpenseData;
 use Hei\AccountingConnector\Data\LineCoding;
+use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
+use Hei\AccountingConnector\Data\RecodeExpectation;
+use Hei\AccountingConnector\Data\RecodeResult;
 use Hei\AccountingConnector\Data\TaxCode;
 use Hei\AccountingConnector\Data\TenantInfo;
 use Hei\AccountingConnector\Data\TokenSet;
 use Hei\AccountingConnector\Data\TrackingCategory;
 use Hei\AccountingConnector\Enums\EntityType;
+use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
+use Hei\AccountingConnector\Exceptions\PreconditionFailedException;
+use Hei\AccountingConnector\Exceptions\RecodeMovedMoneyException;
 use Hei\AccountingConnector\Exceptions\UnsupportedEntityTypeException;
+use Hei\AccountingConnector\Support\RecodeInvariants;
 use Throwable;
 
 /**
@@ -47,9 +60,14 @@ use Throwable;
  *     expect($fake->created)->toHaveCount(1);
  *     expect($fake->createdOf(EntityType::Bill))->toHaveCount(1);
  */
-final class FakeConnector implements AccountingConnector, CodesBankTransactions, ReadsBankTransactions
+final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, ReadsBankTransactions
 {
-    /** @var array<int, array{type: EntityType, payload: EntityPayload, connection: Connection, idempotency_key: string|null}> */
+    /**
+     * Every create, in order. `direction` is set for an expense so a host can assert a
+     * refund went in as a RECEIVE without unpacking the payload.
+     *
+     * @var array<int, array{type: EntityType, payload: EntityPayload, connection: Connection, idempotency_key: string|null, direction: MoneyDirection|null}>
+     */
     public array $created = [];
 
     /** @var array<int, array{type: EntityType, external_id: string, payload: EntityPayload}> */
@@ -89,8 +107,42 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     /** @var array<int, array{query: BankTransactionQuery, connection: Connection}> */
     public array $bankTransactionQueries = [];
 
-    /** @var array<int, array{external_id: string, codings: array<int, LineCoding>}> */
+    /**
+     * Every coding-only recode, kept for hosts that assert on the old shape.
+     *
+     * @var array<int, array{external_id: string, codings: array<int, LineCoding>}>
+     */
     public array $recodings = [];
+
+    /**
+     * Every change that went through recodeBankTransaction(), with what it carried.
+     *
+     * @var array<int, array{external_id: string, change: BankTransactionChange, expectation: RecodeExpectation|null, idempotency_key: string|null}>
+     */
+    public array $changes = [];
+
+    /**
+     * Names findContactByName() was asked for, in order.
+     *
+     * @var array<int, string>
+     */
+    public array $contactLookups = [];
+
+    /**
+     * Every delete, with the idempotency key it carried.
+     *
+     * @var array<int, array{external_id: string, idempotency_key: string|null}>
+     */
+    public array $deleted = [];
+
+    /** @var array<string, Contact> keyed by lowercased name */
+    private array $knownContacts = [];
+
+    /** Returned by the next recode instead of the applied change, then cleared. */
+    private ?BankTransactionData $nextRecodeResult = null;
+
+    /** @var Closure(BankTransactionData|null): (BankTransactionData|null)|null */
+    private ?Closure $mutateBeforeNextRecode = null;
 
     /** How many times refreshLookups() was called. */
     public int $lookupRefreshes = 0;
@@ -113,6 +165,13 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
      */
     private array $contactIds = [];
 
+    /**
+     * Contact ids already handed out, by tenant, role and map key.
+     *
+     * @var array<string, string>
+     */
+    private array $resolvedContactIds = [];
+
     /** Makes tenantInfo() report an unknown tenant. */
     private bool $tenantUnknown = false;
 
@@ -121,6 +180,9 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
 
     /** Thrown by the next bank transaction call, then cleared. */
     private ?Throwable $nextBankTransactionFailure = null;
+
+    /** @var (Closure(): void)|null */
+    private ?Closure $afterNextBankTransactionList = null;
 
     /** Thrown by the next coding change only, then cleared. */
     private ?Throwable $nextRecodingFailure = null;
@@ -240,7 +302,7 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
             tokens: new TokenSet(
                 accessToken: 'fake-access-token',
                 refreshToken: 'fake-refresh-token',
-                expiresAt: (new \DateTimeImmutable)->modify('+30 minutes'),
+                expiresAt: (new DateTimeImmutable)->modify('+30 minutes'),
             ),
             tenantId: 'fake-tenant',
         );
@@ -253,7 +315,7 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         return $connection->withTokens(new TokenSet(
             accessToken: 'refreshed-access-token-'.(++$this->sequence),
             refreshToken: 'refreshed-refresh-token-'.$this->sequence,
-            expiresAt: (new \DateTimeImmutable)->modify('+30 minutes'),
+            expiresAt: (new DateTimeImmutable)->modify('+30 minutes'),
         ));
     }
 
@@ -291,11 +353,16 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
 
         $this->contacts[] = ['contact' => $contact, 'connection' => $connection];
 
+        // Like the real connectors' entity map: the same contact resolves to the
+        // same id every time, so a host that asks again after a create gets the id
+        // the create used rather than a fresh one.
+        $key = $connection->tenantId.'|'.$contact->role->value.'|'.$contact->mapKey();
+
         if ($this->contactIds !== []) {
-            return (string) array_shift($this->contactIds);
+            return $this->resolvedContactIds[$key] = (string) array_shift($this->contactIds);
         }
 
-        return 'fake-contact-'.(++$this->sequence);
+        return $this->resolvedContactIds[$key] ??= 'fake-contact-'.(++$this->sequence);
     }
 
     public function createEntity(
@@ -318,6 +385,7 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
             'payload' => $payload,
             'connection' => $connection,
             'idempotency_key' => $idempotencyKey,
+            'direction' => $payload instanceof ExpenseData ? $payload->direction : null,
         ];
 
         if ($this->nextCreateReturnsNoId) {
@@ -449,6 +517,23 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     }
 
     /**
+     * Run something once, right after the next bank transaction list is answered.
+     *
+     * The way to change the books BETWEEN two pages of one walk: a row that lands
+     * while a host is paging moves the page boundary and Xero's item count, which
+     * is exactly what a completeness check has to notice. Two separate runs cannot
+     * model it; this can.
+     *
+     * @param  Closure(): void  $callback
+     */
+    public function afterNextBankTransactionCall(Closure $callback): self
+    {
+        $this->afterNextBankTransactionList = $callback;
+
+        return $this;
+    }
+
+    /**
      * Make the next coding change throw, leaving reads working.
      *
      * The case a host has to get right: a match is decided, the transaction is read
@@ -480,12 +565,62 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
             fn (BankTransactionData $transaction): bool => $this->matchesQuery($transaction, $query),
         ));
 
-        $offset = (max(1, $query->page) - 1) * BankTransactionQuery::PAGE_SIZE;
+        $this->order($matches, $query->order);
 
-        return new BankTransactionPage(
-            array_slice($matches, $offset, BankTransactionQuery::PAGE_SIZE),
+        $pageSize = $query->effectivePageSize();
+        $offset = ($query->page - 1) * $pageSize;
+
+        // The same pagination object Xero returns, so a host's completeness check
+        // is exercised against the fake exactly as it will be against the provider.
+        $page = new BankTransactionPage(
+            array_slice($matches, $offset, $pageSize),
             $query->page,
+            $pageSize,
+            itemCount: count($matches),
+            pageCount: (int) ceil(count($matches) / $pageSize),
         );
+
+        if ($this->afterNextBankTransactionList !== null) {
+            $callback = $this->afterNextBankTransactionList;
+            $this->afterNextBankTransactionList = null;
+            $callback();
+        }
+
+        return $page;
+    }
+
+    /**
+     * Sort like Xero would, for the two fields a walk orders by.
+     *
+     * `Date` and `UpdatedDateUTC`, ascending or descending, with the id as the
+     * tiebreak Xero applies itself. Nothing asked for means Xero's default,
+     * `UpdatedDateUTC ASC`. Any other field is left in insertion order rather than
+     * guessed at, so a host that orders by something this fake cannot honour sees
+     * it in its test rather than in production.
+     *
+     * @param  array<int, BankTransactionData>  $rows
+     */
+    private function order(array &$rows, ?string $order): void
+    {
+        [$field, $direction] = array_pad(explode(' ', $order ?? 'UpdatedDateUTC ASC', 2), 2, 'ASC');
+
+        $key = match (strtolower($field)) {
+            'date' => static fn (BankTransactionData $row): string => $row->date?->format('Y-m-d') ?? '',
+            'updateddateutc' => static fn (BankTransactionData $row): string => $row->updatedDateUtc?->format('Y-m-d H:i:s.u') ?? '',
+            default => null,
+        };
+
+        if ($key === null) {
+            return;
+        }
+
+        $sign = strtoupper($direction) === 'DESC' ? -1 : 1;
+
+        usort($rows, static function (BankTransactionData $a, BankTransactionData $b) use ($key, $sign): int {
+            $byField = strcmp($key($a), $key($b));
+
+            return $byField !== 0 ? $sign * $byField : $sign * strcmp($a->id, $b->id);
+        });
     }
 
     public function findBankTransaction(Connection $connection, string $externalId): ?BankTransactionData
@@ -496,22 +631,47 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     }
 
     /**
-     * Apply coding and keep the result, so a later find() answers with it.
+     * Apply a change and keep the result, so a later find() answers with it.
      *
-     * @param  array<int, LineCoding>  $codings
+     * The guards are the real connector's, minus the tax arithmetic: the fake has
+     * no rates, so a host exercises the tax refusal with failNextRecoding() and a
+     * ValidationException carrying the reason. The expectation and the moved-money
+     * check are real, because they are what a host's own tests need to hit.
      */
-    public function updateBankTransactionCoding(
+    public function recodeBankTransaction(
         Connection $connection,
         string $externalId,
-        array $codings,
-    ): BankTransactionData {
+        BankTransactionChange $change,
+        ?RecodeExpectation $expectation = null,
+        ?string $idempotencyKey = null,
+    ): RecodeResult {
         $this->guardBankTransactions();
+
+        if ($change->isEmpty()) {
+            throw new InvalidPayloadException(
+                "A recode of {$externalId} that changes nothing was refused before any request.",
+                $this->provider,
+            );
+        }
 
         if ($this->nextRecodingFailure !== null) {
             $failure = $this->nextRecodingFailure;
             $this->nextRecodingFailure = null;
 
             throw $failure;
+        }
+
+        // What the "connector's own read" finds: the stored transaction, after any
+        // change a test staged to land between the host's read and this one.
+        if ($this->mutateBeforeNextRecode !== null) {
+            $mutate = $this->mutateBeforeNextRecode;
+            $this->mutateBeforeNextRecode = null;
+
+            $mutated = $mutate($this->bankTransactions[$externalId] ?? null);
+
+            if ($mutated instanceof BankTransactionData) {
+                $this->bankTransactions[$mutated->id] = $mutated;
+            }
         }
 
         $current = $this->bankTransactions[$externalId] ?? null;
@@ -523,14 +683,196 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
             );
         }
 
-        $this->recodings[] = ['external_id' => $externalId, 'codings' => $codings];
+        if ($expectation !== null) {
+            $differences = $expectation->differences($current);
 
+            // As the real connector: a read that already shows the change applied
+            // is an earlier attempt whose response was lost, not a stale decision.
+            if ($differences !== [] && $change->isSatisfiedBy($current)
+                && $change->codesAfter($expectation->accountCodesByLine) === $current->accountCodesByLine()
+                && ! ($expectation->updatedDateUtc !== null && $current->updatedDateUtc !== null && $current->updatedDateUtc < $expectation->updatedDateUtc)) {
+                return new RecodeResult(
+                    $current->withAccountCodes($expectation->accountCodesByLine, $expectation->updatedDateUtc),
+                    $current,
+                    recovered: true,
+                );
+            }
+
+            if ($differences !== []) {
+                throw new PreconditionFailedException(
+                    sprintf(
+                        'The bank transaction %s changed since the recode was decided: %s.',
+                        $externalId,
+                        implode('; ', $differences),
+                    ),
+                    $current,
+                    $differences,
+                    $this->provider,
+                );
+            }
+        }
+
+        $this->changes[] = [
+            'external_id' => $externalId,
+            'change' => $change,
+            'expectation' => $expectation,
+            'idempotency_key' => $idempotencyKey,
+        ];
+        $this->recodings[] = ['external_id' => $externalId, 'codings' => $change->codings];
+
+        $after = $this->nextRecodeResult ?? $this->applyChange($current, $change);
+        $this->nextRecodeResult = null;
+
+        $moved = RecodeInvariants::movedMoney($current, $after);
+
+        if ($moved !== []) {
+            // The write has "landed" in the fake's books exactly as it would have
+            // in Xero's, so a host sees the state a person would.
+            $this->bankTransactions[$externalId] = $after;
+
+            throw new RecodeMovedMoneyException(
+                sprintf('Recoding the bank transaction %s moved money: %s.', $externalId, implode('; ', $moved)),
+                $current,
+                $after,
+                $moved,
+                $this->provider,
+            );
+        }
+
+        $this->bankTransactions[$externalId] = $after;
+
+        return new RecodeResult($current, $after);
+    }
+
+    /**
+     * The coding-only wrapper, like the real connector's.
+     *
+     * @param  array<int, LineCoding>  $codings
+     */
+    public function updateBankTransactionCoding(
+        Connection $connection,
+        string $externalId,
+        array $codings,
+    ): BankTransactionData {
+        return $this->recodeBankTransaction($connection, $externalId, new BankTransactionChange($codings))->after;
+    }
+
+    /**
+     * Delete by status, keeping the row so a later find() shows it DELETED.
+     *
+     * Xero may answer a GET after a delete with a 404 or with the row and its new
+     * status; the fake does the second so a host's "already gone" branch and its
+     * "gone, but still listed" branch are both reachable from one fixture. An id the
+     * fake never held answers as the real connector answers a 404: a placeholder
+     * with status DELETED.
+     */
+    public function deleteBankTransaction(Connection $connection, string $externalId, ?string $idempotencyKey = null): BankTransactionData
+    {
+        $this->guardBankTransactions();
+
+        $this->deleted[] = ['external_id' => $externalId, 'idempotency_key' => $idempotencyKey];
+
+        $current = $this->bankTransactions[$externalId] ?? null;
+
+        if ($current === null) {
+            return new BankTransactionData(
+                id: $externalId,
+                type: null,
+                date: null,
+                total: Money::zero(),
+                status: 'DELETED',
+            );
+        }
+
+        $deleted = new BankTransactionData(
+            id: $current->id,
+            type: $current->type,
+            date: $current->date,
+            total: $current->total,
+            subTotal: $current->subTotal,
+            totalTax: $current->totalTax,
+            currency: $current->currency,
+            status: 'DELETED',
+            contactId: $current->contactId,
+            contactName: $current->contactName,
+            bankAccountId: $current->bankAccountId,
+            bankAccountName: $current->bankAccountName,
+            reference: $current->reference,
+            isReconciled: $current->isReconciled,
+            hasAttachments: $current->hasAttachments,
+            lines: $current->lines,
+            updatedDateUtc: new DateTimeImmutable,
+            lineAmountType: $current->lineAmountType,
+            currencyRate: $current->currencyRate,
+        );
+
+        $this->bankTransactions[$externalId] = $deleted;
+
+        return $deleted;
+    }
+
+    /**
+     * Stock the fake with contacts findContactByName() can answer with.
+     */
+    public function withContacts(Contact ...$contacts): self
+    {
+        foreach ($contacts as $contact) {
+            $this->knownContacts[strtolower(trim($contact->name))] = $contact;
+        }
+
+        return $this;
+    }
+
+    public function findContactByName(Connection $connection, string $name): ?Contact
+    {
+        $this->guardLookups();
+
+        $this->contactLookups[] = $name;
+
+        return $this->knownContacts[strtolower(trim($name))] ?? null;
+    }
+
+    /**
+     * Make the next recode come back with this transaction, whatever was asked.
+     *
+     * For the moved-money path: hand back a copy with a different total and the
+     * fake raises RecodeMovedMoneyException exactly as the real connector would.
+     */
+    public function nextRecodeReturns(BankTransactionData $transaction): self
+    {
+        $this->nextRecodeResult = $transaction;
+
+        return $this;
+    }
+
+    /**
+     * Change the stored transaction between the host's read and the connector's.
+     *
+     * The closure gets the stored transaction (or null) and returns the one the
+     * connector will find. A host test uses it to prove a stale expectation is
+     * refused: read, stage a change here, then recode with the expectation from the
+     * read.
+     *
+     * @param  Closure(BankTransactionData|null): (BankTransactionData|null)  $mutate
+     */
+    public function mutateBeforeNextRecode(Closure $mutate): self
+    {
+        $this->mutateBeforeNextRecode = $mutate;
+
+        return $this;
+    }
+
+    /**
+     * The transaction as it stands after a change, coded and re-contacted.
+     */
+    private function applyChange(BankTransactionData $current, BankTransactionChange $change): BankTransactionData
+    {
         $lines = array_map(
-            function (BankTransactionLine $line) use ($codings): BankTransactionLine {
+            function (BankTransactionLine $line) use ($change): BankTransactionLine {
                 $accountCode = $line->accountCode;
                 $tracking = $line->tracking;
 
-                foreach ($codings as $coding) {
+                foreach ($change->codings as $coding) {
                     if (! $coding->appliesTo($line->lineItemId)) {
                         continue;
                     }
@@ -549,12 +891,17 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
                     accountId: $line->accountId,
                     taxType: $line->taxType,
                     tracking: $tracking,
+                    unitAmountExact: $line->unitAmountExact,
+                    taxAmount: $line->taxAmount,
+                    itemCode: $line->itemCode,
                 );
             },
             $current->lines,
         );
 
-        $recoded = new BankTransactionData(
+        $contactId = $change->contactId ?? $current->contactId;
+
+        return new BankTransactionData(
             id: $current->id,
             type: $current->type,
             date: $current->date,
@@ -563,20 +910,31 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
             totalTax: $current->totalTax,
             currency: $current->currency,
             status: $current->status,
-            contactId: $current->contactId,
-            contactName: $current->contactName,
+            contactId: $contactId,
+            contactName: $change->contactId !== null && $change->contactId !== $current->contactId
+                ? $this->contactNameFor($change->contactId)
+                : $current->contactName,
             bankAccountId: $current->bankAccountId,
             bankAccountName: $current->bankAccountName,
             reference: $current->reference,
             isReconciled: $current->isReconciled,
             hasAttachments: $current->hasAttachments,
             lines: $lines,
-            updatedDateUtc: $current->updatedDateUtc,
+            updatedDateUtc: new DateTimeImmutable,
+            lineAmountType: $current->lineAmountType,
+            currencyRate: $current->currencyRate,
         );
+    }
 
-        $this->bankTransactions[$externalId] = $recoded;
+    private function contactNameFor(string $contactId): ?string
+    {
+        foreach ($this->knownContacts as $contact) {
+            if ($contact->id === $contactId) {
+                return $contact->name;
+            }
+        }
 
-        return $recoded;
+        return null;
     }
 
     private function matchesQuery(BankTransactionData $transaction, BankTransactionQuery $query): bool
@@ -637,7 +995,7 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     /**
      * Everything created of one type, for assertions.
      *
-     * @return array<int, array{type: EntityType, payload: EntityPayload, connection: Connection, idempotency_key: string|null}>
+     * @return array<int, array{type: EntityType, payload: EntityPayload, connection: Connection, idempotency_key: string|null, direction: MoneyDirection|null}>
      */
     public function createdOf(EntityType $type): array
     {
@@ -665,10 +1023,19 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         $this->nextFailure = null;
         $this->nextAttachmentResult = null;
         $this->contactIds = [];
+        $this->resolvedContactIds = [];
         $this->unsupported = [];
         $this->bankTransactions = [];
         $this->bankTransactionQueries = [];
         $this->recodings = [];
+        $this->changes = [];
+        $this->deleted = [];
+        $this->contactLookups = [];
+        $this->knownContacts = [];
+        $this->nextRecodeResult = null;
+        $this->mutateBeforeNextRecode = null;
         $this->nextBankTransactionFailure = null;
+        $this->nextRecodingFailure = null;
+        $this->afterNextBankTransactionList = null;
     }
 }

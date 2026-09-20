@@ -7,32 +7,15 @@ use Hei\AccountingConnector\Data\BankTransactionQuery;
 use Hei\AccountingConnector\Data\LineCoding;
 use Hei\AccountingConnector\Data\TrackingRef;
 use Hei\AccountingConnector\Enums\BankTransactionType;
+use Hei\AccountingConnector\Enums\Provider;
+use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\ValidationException;
-use Hei\AccountingConnector\Testing\FakeHttpClient;
-
-function xeroReader(FakeHttpClient $fake): XeroConnector
-{
-    return new XeroConnector(
-        http: httpClientOver($fake, maxRetries: 0),
-        clientId: 'client-id',
-        clientSecret: 'client-secret',
-        redirectUri: 'https://app.test/callback',
-    );
-}
-
-/**
- * The query string of a recorded request, decoded.
- *
- * @return array<string, string>
- */
-function queryOf(FakeHttpClient $fake, int $index): array
-{
-    parse_str((string) $fake->requests[$index]->getUri()->getQuery(), $parsed);
-
-    /** @var array<string, string> $parsed */
-    return $parsed;
-}
+use Hei\AccountingConnector\Http\HttpClient;
+use Hei\AccountingConnector\Http\HttpResponse;
+use Hei\AccountingConnector\Http\NullSleeper;
+use Hei\AccountingConnector\Http\RequestGate;
+use Http\Discovery\Psr17FactoryDiscovery;
 
 it('reads a page of bank transactions off the wire', function () {
     $fake = fakeHttp();
@@ -135,7 +118,9 @@ it('treats a 304 as an empty page rather than a failure', function () {
         ->and($page->hasMore())->toBeFalse();
 });
 
-it('reports a full page as having more', function () {
+it('reports a full page as having more when the provider gives no counts', function () {
+    // An older response shape with no pagination object: the full page is the only
+    // signal, measured against the page size that was actually requested.
     $rows = [];
 
     for ($i = 0; $i < BankTransactionQuery::PAGE_SIZE; $i++) {
@@ -145,20 +130,139 @@ it('reports a full page as having more', function () {
     $fake = fakeHttp();
     $fake->queue(200, ['BankTransactions' => $rows]);
 
-    $page = xeroReader($fake)->listBankTransactions(connection(), new BankTransactionQuery);
+    $page = xeroReader($fake)->listBankTransactions(connection(), new BankTransactionQuery(
+        pageSize: BankTransactionQuery::PAGE_SIZE,
+    ));
 
     expect($page->hasMore())->toBeTrue()
+        ->and($page->isCounted())->toBeFalse()
         ->and($page->count())->toBe(BankTransactionQuery::PAGE_SIZE);
 });
 
-it('reads one bank transaction by id', function () {
+it('reads the item and page counts off a paged response and trusts them over the heuristic', function () {
+    // Xero's pagination object is what lets a host prove a walk was complete: the
+    // rows it mirrored either add up to itemCount or something moved underneath it.
+    $fake = fakeHttp();
+    $fake->queue(200, [
+        'pagination' => ['page' => 3, 'pageSize' => 250, 'pageCount' => 3, 'itemCount' => 612],
+        'BankTransactions' => array_fill(0, 250, ['BankTransactionID' => 'x', 'Type' => 'SPEND', 'Total' => 1.0]),
+    ]);
+
+    $page = xeroReader($fake)->listBankTransactions(connection(), new BankTransactionQuery(page: 3));
+
+    expect($page->isCounted())->toBeTrue()
+        ->and($page->itemCount)->toBe(612)
+        ->and($page->pageCount)->toBe(3)
+        // A full page, but the last one: the provider's count wins.
+        ->and($page->hasMore())->toBeFalse();
+});
+
+it('sends the page size, the order and four-decimal unit amounts on every list', function () {
+    $fake = fakeHttp();
+    $fake->queue(200, ['BankTransactions' => []]);
+    $fake->queue(200, ['BankTransactions' => []]);
+
+    $reader = xeroReader($fake);
+
+    $reader->listBankTransactions(connection(), new BankTransactionQuery);
+    $reader->listBankTransactions(connection(), new BankTransactionQuery(
+        order: 'Date ASC',
+        pageSize: 1000,
+    ));
+
+    $first = queryOf($fake, 0);
+    $second = queryOf($fake, 1);
+
+    // The documented figure, not the spec's, until a contract test raises it.
+    expect($first['pageSize'])->toBe((string) BankTransactionQuery::DEFAULT_PAGE_SIZE)
+        ->and($first['unitdp'])->toBe('4')
+        ->and($first)->not->toHaveKey('order')
+        ->and($second['pageSize'])->toBe('1000')
+        ->and($second['order'])->toBe('Date ASC');
+});
+
+it('lets the host configure the page size a query does not set', function () {
+    $fake = fakeHttp();
+    $fake->queue(200, ['BankTransactions' => []]);
+    $fake->queue(200, ['BankTransactions' => []]);
+
+    $reader = xeroReader($fake)->usingBankTransactionPageSize(500);
+
+    $reader->listBankTransactions(connection(), new BankTransactionQuery);
+    $reader->listBankTransactions(connection(), new BankTransactionQuery(pageSize: 50));
+
+    expect(queryOf($fake, 0)['pageSize'])->toBe('500')
+        // An explicit size on the query still wins.
+        ->and(queryOf($fake, 1)['pageSize'])->toBe('50');
+});
+
+it('refuses a page size or an order expression the provider would not understand', function () {
+    expect(fn () => new BankTransactionQuery(pageSize: 0))->toThrow(InvalidPayloadException::class)
+        ->and(fn () => new BankTransactionQuery(pageSize: 1001))->toThrow(InvalidPayloadException::class)
+        ->and(fn () => new BankTransactionQuery(order: 'Date; DROP'))->toThrow(InvalidPayloadException::class)
+        ->and(fn () => new BankTransactionQuery(page: 0))->toThrow(InvalidPayloadException::class)
+        ->and(fn () => xeroReader(fakeHttp())->usingBankTransactionPageSize(2000))->toThrow(InvalidPayloadException::class);
+});
+
+it('carries the order and page size onto the next page', function () {
+    $next = (new BankTransactionQuery(order: 'UpdatedDateUTC ASC', pageSize: 100, page: 4))->nextPage();
+
+    expect($next->page)->toBe(5)
+        ->and($next->order)->toBe('UpdatedDateUTC ASC')
+        ->and($next->pageSize)->toBe(100);
+});
+
+it('tells the request gate which tenant every bank transaction call spends', function () {
+    $gate = new class implements RequestGate
+    {
+        /** @var array<int, string> */
+        public array $seen = [];
+
+        public function acquire(?Provider $provider, ?string $tenantId): void
+        {
+            $this->seen[] = ($provider?->value ?? '-').':'.($tenantId ?? '-');
+        }
+
+        public function observe(HttpResponse $response, ?Provider $provider, ?string $tenantId): void {}
+
+        public function release(?Provider $provider, ?string $tenantId, Throwable $failure): void {}
+    };
+
+    $fake = fakeHttp();
+    $fake->queue(200, ['BankTransactions' => []]);
+    $fake->queue(200, providerResponse('xero/bank-transactions'));
+
+    $reader = new XeroConnector(
+        http: new HttpClient(
+            client: $fake,
+            requestFactory: Psr17FactoryDiscovery::findRequestFactory(),
+            streamFactory: Psr17FactoryDiscovery::findStreamFactory(),
+            sleeper: new NullSleeper,
+            maxRetries: 0,
+            gate: $gate,
+        ),
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        redirectUri: 'https://app.test/callback',
+    );
+
+    $reader->listBankTransactions(connection(), new BankTransactionQuery);
+    $reader->findBankTransaction(connection(), 'spend-uuid-1');
+
+    expect($gate->seen)->toBe(['xero:tenant-1', 'xero:tenant-1']);
+});
+
+it('reads one bank transaction by id, at four decimal places', function () {
     $fake = fakeHttp();
     $fake->queue(200, providerResponse('xero/bank-transactions'));
 
     $transaction = xeroReader($fake)->findBankTransaction(connection(), 'spend-uuid-1');
 
     expect($transaction?->id)->toBe('spend-uuid-1')
-        ->and($fake->requests[0]->getUri()->getPath())->toBe('/api.xro/2.0/BankTransactions/spend-uuid-1');
+        ->and($fake->requests[0]->getUri()->getPath())->toBe('/api.xro/2.0/BankTransactions/spend-uuid-1')
+        // A unit price read at two places cannot be sent back without moving the
+        // money on a line that had four, so every read asks for four.
+        ->and(queryOf($fake, 0)['unitdp'])->toBe('4');
 });
 
 it('answers null for a transaction the customer has deleted', function () {
@@ -214,13 +318,23 @@ it('leaves lines the coding does not name alone', function () {
     $fake->queue(200, ['BankTransactions' => [[
         'BankTransactionID' => 'spend-uuid-3',
         'Type' => 'SPEND',
+        'LineAmountTypes' => 'NoTax',
         'Total' => 30.0,
         'LineItems' => [
             ['LineItemID' => 'line-a', 'UnitAmount' => 10.0, 'AccountCode' => '400'],
             ['LineItemID' => 'line-b', 'UnitAmount' => 20.0, 'AccountCode' => '401'],
         ],
     ]]]);
-    $fake->queue(200, ['BankTransactions' => [['BankTransactionID' => 'spend-uuid-3', 'Type' => 'SPEND', 'Total' => 30.0]]]);
+    $fake->queue(200, ['BankTransactions' => [[
+        'BankTransactionID' => 'spend-uuid-3',
+        'Type' => 'SPEND',
+        'LineAmountTypes' => 'NoTax',
+        'Total' => 30.0,
+        'LineItems' => [
+            ['LineItemID' => 'line-a', 'UnitAmount' => 10.0, 'AccountCode' => '400'],
+            ['LineItemID' => 'line-b', 'UnitAmount' => 20.0, 'AccountCode' => '429'],
+        ],
+    ]]]);
 
     xeroReader($fake)->updateBankTransactionCoding(connection(), 'spend-uuid-3', [
         LineCoding::forLine('line-b', '429'),

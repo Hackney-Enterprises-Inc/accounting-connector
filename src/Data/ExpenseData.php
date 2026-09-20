@@ -8,13 +8,19 @@ use DateTimeImmutable;
 use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\LineAmountType;
+use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\TransactionStatus;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
 
 /**
- * Money already spent: a receipt, a card charge, a spend-money transaction.
+ * Money that already moved: a receipt, a card charge, a refund back onto the card.
  *
- * Posts as a Xero SPEND BankTransaction or a QuickBooks Purchase.
+ * Posts as a Xero SPEND BankTransaction or a QuickBooks Purchase; with
+ * `$direction` set to {@see MoneyDirection::In} it posts as a Xero RECEIVE, which
+ * is how a credit note or refund lands as money back in rather than as a positive
+ * spend. Amounts stay positive either way; the direction is the sign. QuickBooks
+ * has no money-in Purchase, so its connector refuses a RECEIVE rather than posting
+ * it the wrong way round.
  *
  * `$bankAccount` is not optional in practice. Xero rejects a SPEND transaction
  * without a bank account, and QuickBooks rejects a Purchase without an AccountRef.
@@ -40,6 +46,8 @@ final readonly class ExpenseData implements EntityPayload
         public TransactionStatus $status = TransactionStatus::Authorised,
         public LineAmountType $lineAmountType = LineAmountType::Exclusive,
         public ?string $localId = null,
+        /** Which way the money moved. Out is a spend; In is a refund or credit received. */
+        public MoneyDirection $direction = MoneyDirection::Out,
     ) {
         if ($this->lines === []) {
             throw new InvalidPayloadException('An expense needs at least one line item.');
@@ -87,6 +95,7 @@ final readonly class ExpenseData implements EntityPayload
             status: $this->status,
             lineAmountType: $this->lineAmountType,
             localId: $this->localId,
+            direction: $this->direction,
         );
     }
 
