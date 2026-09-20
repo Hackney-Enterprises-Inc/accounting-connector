@@ -417,6 +417,69 @@ it('still refuses a read that differs in any way other than the change itself', 
     expect(methodsOf($fake))->toBe(['GET']);
 });
 
+it('never reads a change that matches no line as already landed', function () {
+    // The transaction was touched (its stamp moved) but its codes are as expected,
+    // and the change names a line that is not on it. Nothing could have landed;
+    // that is a stale decision, not a lost response.
+    $decidedAgainst = xeroReaderRead(transactionResponse('spend-uuid-2'));
+
+    $fake = fakeHttp();
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['UpdatedDateUTC' => '/Date(1787745700000+0000)/']));
+
+    expect(fn () => xeroReader($fake)->recodeBankTransaction(
+        connection(),
+        'spend-uuid-2',
+        new BankTransactionChange([LineCoding::forLine('line-that-is-not-there', '450')]),
+        RecodeExpectation::from($decidedAgainst),
+        'recode-op-123',
+    ))->toThrow(PreconditionFailedException::class);
+
+    expect(methodsOf($fake))->toBe(['GET']);
+});
+
+it('refuses to recode a transaction whose type it does not know, rather than sending it back as a SPEND', function () {
+    // A type this build has no case for reads back as null. Defaulting the write
+    // to SPEND would turn a money-in line into money out.
+    $fake = fakeHttp();
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['Type' => 'RECEIVE-SOMETHING-NEW']));
+    $fake->queue(200, providerResponse('xero/tax-rates'));
+
+    try {
+        xeroReader($fake)->recodeBankTransaction(connection(), 'spend-uuid-2', BankTransactionChange::allLines('450'));
+        $this->fail('an unknown type must be refused before any write');
+    } catch (ValidationException $e) {
+        expect($e->reason)->toBe(ValidationException::REASON_TYPE_UNKNOWN)
+            ->and($e->getMessage())->toContain('spend-uuid-2');
+    }
+
+    expect(methodsOf($fake))->not->toContain('POST');
+});
+
+it('sends a RECEIVE back as a RECEIVE', function () {
+    $fake = fakeHttp();
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['Type' => 'RECEIVE']));
+    $fake->queue(200, providerResponse('xero/tax-rates'));
+    $fake->queue(200, transactionResponse('spend-uuid-2', ['Type' => 'RECEIVE'], [['AccountCode' => '450']]));
+
+    xeroReader($fake)->recodeBankTransaction(connection(), 'spend-uuid-2', BankTransactionChange::allLines('450'));
+
+    expect($fake->requestBody(2)['BankTransactions'][0]['Type'])->toBe('RECEIVE');
+});
+
+it('reports a line tax that appeared or vanished as moved money', function () {
+    $fake = fakeHttp();
+    $fake->queue(200, transactionResponse('spend-uuid-2'));
+    $fake->queue(200, providerResponse('xero/tax-rates'));
+    $row = transactionResponse('spend-uuid-2', lineOverrides: [['AccountCode' => '450']]);
+    unset($row['BankTransactions'][0]['LineItems'][0]['TaxAmount']);
+    $fake->queue(200, $row);
+
+    expect(fn () => xeroReader($fake)->recodeBankTransaction(connection(), 'spend-uuid-2', BankTransactionChange::allLines('450')))
+        ->toThrow(function (RecodeMovedMoneyException $e): void {
+            expect(implode(' ', $e->differences))->toContain('line line-uuid-2 TaxAmount 12.00 became none');
+        });
+});
+
 it('writes once when the expectation still holds, with the idempotency key on the wire', function () {
     $decidedAgainst = xeroReaderRead(transactionResponse('spend-uuid-2'));
 

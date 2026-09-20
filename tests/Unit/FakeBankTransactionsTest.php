@@ -355,3 +355,13 @@ it('treats a retry whose read already carries the change as landed, like the rea
         ->and($result->after->accountCodes())->toBe(['429'])
         ->and($result->before->accountCodesByLine())->toBe($before->accountCodesByLine());
 });
+
+it('is not satisfied by a transaction none of its codings reach', function () {
+    $coded = codedTransaction('one', '429');
+    $bare = new BankTransactionData(id: 'bare', type: BankTransactionType::Spend, date: new DateTimeImmutable('2026-03-01'), total: Money::cents(100));
+
+    expect((new BankTransactionChange([LineCoding::forLine('line-that-is-not-there', '429')]))->isSatisfiedBy($coded))->toBeFalse()
+        ->and(BankTransactionChange::allLines('429')->isSatisfiedBy($bare))->toBeFalse()
+        ->and(BankTransactionChange::allLines('429')->isSatisfiedBy($coded))->toBeTrue()
+        ->and((new BankTransactionChange([LineCoding::forLine('line-1', '429')]))->isSatisfiedBy($coded))->toBeTrue();
+});

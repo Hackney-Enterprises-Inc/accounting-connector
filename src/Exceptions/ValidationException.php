@@ -37,6 +37,13 @@ final class ValidationException extends AccountingConnectorException
     public const REASON_TAX_RATE_UNKNOWN = 'tax_rate_unknown';
 
     /**
+     * The transaction's type is one this connector has no case for, so a replacing
+     * write could not send it back; a defaulted type would change what the
+     * transaction is (a SPEND for a money-in line). Refused before any request.
+     */
+    public const REASON_TYPE_UNKNOWN = 'type_unknown';
+
+    /**
      * @param  array<int, string>  $errors  Individual provider validation messages.
      */
     public function __construct(

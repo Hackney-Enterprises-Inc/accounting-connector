@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RecodeResult` with `recovered: true`; its `before` is the expectation laid over that read.
   `BankTransactionChange::isSatisfiedBy()` / `codesAfter()`, `BankTransactionData::withAccountCodes()`
   and `BankTransactionLine::withAccountCode()` are the pieces. The fake does the same.
+- The lost-response recovery is strict about reach: a change with a coding that matches no
+  line on the read (a line that is not there, or an all-lines coding on a transaction with no
+  lines) is never taken as landed (`BankTransactionChange::isSatisfiedBy()`).
+- `RecodeInvariants::movedMoney()` reports a line tax that appeared or vanished, not only one
+  that changed amount.
+- A recode of a transaction whose type the connector has no case for is refused before any
+  request with `ValidationException::REASON_TYPE_UNKNOWN` (`type_unknown`); the replacing write
+  sends the read's own type and never defaults it to SPEND.
 - `RequestGate::observe(HttpResponse, ?Provider, ?string $tenantId)` is called by `HttpClient`
   for every response it receives, retried 429s and 5xx included, before its own listeners; a gate
   that throws there is logged and ignored. `NullRequestGate` implements it as a no-op. A host that

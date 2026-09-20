@@ -74,7 +74,14 @@ final class RecodeInvariants
             // 4.99 and 5.01 to 5.00 and 5.00 leave every header figure where it
             // was, and a unit price re-rounded by the provider is a different line
             // even when the line amount it was multiplied into happens to agree.
-            if ($line->taxAmount !== null && $other->taxAmount !== null && $line->taxAmount->amount !== $other->taxAmount->amount) {
+            if (($line->taxAmount === null) !== ($other->taxAmount === null)) {
+                $moved[] = sprintf(
+                    'line %s TaxAmount %s became %s',
+                    $id,
+                    $line->taxAmount === null ? 'none' : number_format($line->taxAmount->amount / 100, 2, '.', ''),
+                    $other->taxAmount === null ? 'none' : number_format($other->taxAmount->amount / 100, 2, '.', ''),
+                );
+            } elseif ($line->taxAmount !== null && $other->taxAmount !== null && $line->taxAmount->amount !== $other->taxAmount->amount) {
                 $moved[] = self::describe("line {$id} TaxAmount", $line->taxAmount->amount, $other->taxAmount->amount);
             }
 

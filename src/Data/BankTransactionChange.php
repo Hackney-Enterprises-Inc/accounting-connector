@@ -81,11 +81,18 @@ final readonly class BankTransactionChange
             return false;
         }
 
+        // A coding that reaches no line at all (a line that is not on the
+        // transaction, or an all-lines coding on a transaction with no lines) is
+        // not satisfied by anything: nothing it asked for can have happened.
+        $reached = [];
+
         foreach ($transaction->lines as $line) {
-            foreach ($this->codings as $coding) {
+            foreach ($this->codings as $index => $coding) {
                 if (! $coding->appliesTo($line->lineItemId)) {
                     continue;
                 }
+
+                $reached[$index] = true;
 
                 if ($coding->accountCode !== null && $line->accountCode !== $coding->accountCode) {
                     return false;
@@ -94,6 +101,12 @@ final readonly class BankTransactionChange
                 if ($coding->tracking !== null && ! self::sameTracking($line->tracking, $coding->tracking)) {
                     return false;
                 }
+            }
+        }
+
+        foreach ($this->codings as $index => $coding) {
+            if (! $coding->isEmpty() && ! isset($reached[$index])) {
+                return false;
             }
         }
 

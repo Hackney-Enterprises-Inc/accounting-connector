@@ -1139,6 +1139,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
         }
 
         $this->refuseWhenTaxWouldMove($connection, $current);
+        $type = $this->requireKnownType($current);
 
         // unitdp=4 on the write as on the reads: without it Xero rounds the
         // UnitAmount it is handed to two places before recomputing the line, so a
@@ -1146,7 +1147,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
         // by a cent (invariant 15). The row Xero answers with comes back at four
         // places too, which is what the moved-money check compares.
         $response = $this->post($connection, 'BankTransactions', [
-            'BankTransactions' => [$this->recodedBody($current, $change)],
+            'BankTransactions' => [$this->recodedBody($current, $change, $type)],
         ], $idempotencyKey, self::UNIT_DP);
 
         if ($response->failed()) {
@@ -1403,6 +1404,28 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
     }
 
     /**
+     * The transaction's type, which the replacing write has to send back as it is.
+     *
+     * A type this build has no case for reads back as null; there is no honest
+     * value to send in its place (a default of SPEND would turn a money-in line
+     * into money out), so the recode is refused before any request.
+     *
+     * @throws ValidationException
+     */
+    private function requireKnownType(BankTransactionData $current): BankTransactionType
+    {
+        if ($current->type instanceof BankTransactionType) {
+            return $current->type;
+        }
+
+        throw new ValidationException(
+            "The bank transaction {$current->id} is of a type this connector does not know, so a recode could not send it back unchanged.",
+            $this->provider(),
+            reason: ValidationException::REASON_TYPE_UNKNOWN,
+        );
+    }
+
+    /**
      * Whether a fresh read is exactly the state the change would have produced
      * from the expected one: an earlier write that landed.
      */
@@ -1553,11 +1576,11 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
      *
      * @return array<string, mixed>
      */
-    private function recodedBody(BankTransactionData $current, BankTransactionChange $change): array
+    private function recodedBody(BankTransactionData $current, BankTransactionChange $change, BankTransactionType $type): array
     {
         $body = [
             'BankTransactionID' => $current->id,
-            'Type' => $current->type->value ?? BankTransactionType::Spend->value,
+            'Type' => $type->value,
             'LineAmountTypes' => ($current->lineAmountType ?? LineAmountType::Inclusive)->toXero(),
             'LineItems' => array_map(
                 fn (BankTransactionLine $line): array => $this->recodedLine($line, $change->codings),
