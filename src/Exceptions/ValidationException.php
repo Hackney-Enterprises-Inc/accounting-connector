@@ -44,6 +44,13 @@ final class ValidationException extends AccountingConnectorException
     public const REASON_TYPE_UNKNOWN = 'type_unknown';
 
     /**
+     * The transaction is a transfer, overpayment or prepayment leg: recognised, but
+     * not something a document is ever matched to or that a recode may touch
+     * (only SPEND and RECEIVE are). Refused before any request.
+     */
+    public const REASON_TYPE_NOT_RECODABLE = 'type_not_recodable';
+
+    /**
      * @param  array<int, string>  $errors  Individual provider validation messages.
      */
     public function __construct(

@@ -1404,25 +1404,37 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
     }
 
     /**
-     * The transaction's type, which the replacing write has to send back as it is.
+     * The transaction's type, which the replacing write has to send back as it is,
+     * and which has to be one a recode may touch at all.
      *
      * A type this build has no case for reads back as null; there is no honest
      * value to send in its place (a default of SPEND would turn a money-in line
-     * into money out), so the recode is refused before any request.
+     * into money out), so the recode is refused before any request. A recognised
+     * type that is not SPEND or RECEIVE (a transfer, overpayment or prepayment
+     * leg) is refused too: nothing is ever matched to one, and recoding one is
+     * outside what this package does to a customer's books.
      *
      * @throws ValidationException
      */
     private function requireKnownType(BankTransactionData $current): BankTransactionType
     {
-        if ($current->type instanceof BankTransactionType) {
-            return $current->type;
+        if (! $current->type instanceof BankTransactionType) {
+            throw new ValidationException(
+                "The bank transaction {$current->id} is of a type this connector does not know, so a recode could not send it back unchanged.",
+                $this->provider(),
+                reason: ValidationException::REASON_TYPE_UNKNOWN,
+            );
         }
 
-        throw new ValidationException(
-            "The bank transaction {$current->id} is of a type this connector does not know, so a recode could not send it back unchanged.",
-            $this->provider(),
-            reason: ValidationException::REASON_TYPE_UNKNOWN,
-        );
+        if (! $current->type->isMatchable()) {
+            throw new ValidationException(
+                "The bank transaction {$current->id} is a {$current->type->value}; only SPEND and RECEIVE transactions are recoded.",
+                $this->provider(),
+                reason: ValidationException::REASON_TYPE_NOT_RECODABLE,
+            );
+        }
+
+        return $current->type;
     }
 
     /**

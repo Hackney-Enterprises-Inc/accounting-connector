@@ -455,6 +455,24 @@ it('refuses to recode a transaction whose type it does not know, rather than sen
     expect(methodsOf($fake))->not->toContain('POST');
 });
 
+it('refuses to recode a transfer, overpayment or prepayment leg before any write (invariant 12)', function () {
+    foreach (['SPEND-TRANSFER', 'RECEIVE-TRANSFER', 'SPEND-OVERPAYMENT', 'RECEIVE-PREPAYMENT'] as $type) {
+        $fake = fakeHttp();
+        $fake->queue(200, transactionResponse('spend-uuid-2', ['Type' => $type]));
+        $fake->queue(200, providerResponse('xero/tax-rates'));
+
+        try {
+            xeroReader($fake)->recodeBankTransaction(connection(), 'spend-uuid-2', BankTransactionChange::allLines('450'));
+            $this->fail("a {$type} must be refused before any write");
+        } catch (ValidationException $e) {
+            expect($e->reason)->toBe(ValidationException::REASON_TYPE_NOT_RECODABLE)
+                ->and($e->getMessage())->toContain($type);
+        }
+
+        expect(methodsOf($fake))->not->toContain('POST');
+    }
+});
+
 it('sends a RECEIVE back as a RECEIVE', function () {
     $fake = fakeHttp();
     $fake->queue(200, transactionResponse('spend-uuid-2', ['Type' => 'RECEIVE']));

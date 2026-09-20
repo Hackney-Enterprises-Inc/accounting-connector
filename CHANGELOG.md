@@ -32,7 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that changed amount.
 - A recode of a transaction whose type the connector has no case for is refused before any
   request with `ValidationException::REASON_TYPE_UNKNOWN` (`type_unknown`); the replacing write
-  sends the read's own type and never defaults it to SPEND.
+  sends the read's own type and never defaults it to SPEND. A recognised type that is not SPEND
+  or RECEIVE (a transfer, overpayment or prepayment leg) is refused with
+  `REASON_TYPE_NOT_RECODABLE` (`type_not_recodable`): only the two matchable types are ever
+  recoded (invariant 12 at the package boundary).
 - `RequestGate::observe(HttpResponse, ?Provider, ?string $tenantId)` is called by `HttpClient`
   for every response it receives, retried 429s and 5xx included, before its own listeners; a gate
   that throws there is logged and ignored. `NullRequestGate` implements it as a no-op. A host that
