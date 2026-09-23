@@ -62,6 +62,68 @@ it('classifies accounts so a host can filter without knowing either vocabulary',
         ->and(Account::only($accounts, AccountClass::Bank)[0]->lineReference())->toBe('bank-uuid');
 });
 
+it('carries Xero account descriptions, reading an absent or empty one as null', function () {
+    $payload = accountsPayload();
+    $payload['Accounts'][] = [
+        'AccountID' => 'blank-uuid', 'Code' => '410', 'Name' => 'Blank Description',
+        'Type' => 'EXPENSE', 'Status' => 'ACTIVE', 'Description' => '',
+    ];
+    $fake = fakeHttp();
+    $fake->queue(200, $payload);
+
+    $byId = [];
+    foreach (xeroWithStore($fake)->chartOfAccounts(connection()) as $account) {
+        $byId[$account->id] = $account;
+    }
+
+    expect($byId['exp-uuid']->description)->toBe('General expenses')
+        ->and($byId['rev-uuid']->description)->toBe('Income from consulting services')
+        ->and($byId['bank-uuid']->description)->toBeNull()
+        ->and($byId['blank-uuid']->description)->toBeNull();
+});
+
+it('round-trips descriptions through the durable store', function () {
+    // Fetched once, then served from the store with a cold cache: the description
+    // must survive the flatten and the rebuild, or the second read loses it.
+    $store = new ArrayLookupStore;
+    $fake = fakeHttp();
+    $fake->queue(200, accountsPayload());
+
+    xeroWithStore($fake, $store)->chartOfAccounts(connection());
+    $stored = $store->get(connection(), AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS);
+
+    $again = xeroWithStore(fakeHttp(), $store)->chartOfAccounts(connection());
+    $expense = array_values(array_filter($again, fn (Account $a): bool => $a->id === 'exp-uuid'))[0];
+
+    expect(array_column($stored ?? [], 'description', 'id'))->toMatchArray(['exp-uuid' => 'General expenses'])
+        ->and($expense->description)->toBe('General expenses');
+});
+
+it('hydrates a legacy account payload that predates description', function () {
+    $account = Account::fromArray(['id' => 'exp-uuid', 'name' => 'General Expenses', 'code' => '400', 'class' => 'expense']);
+
+    expect($account->description)->toBeNull()
+        ->and($account->toArray())->toHaveKey('description', null)
+        ->and(Account::fromArray($account->toArray())->description)->toBeNull();
+});
+
+it('reads the chart under a key that bypasses rows stored before description existed', function () {
+    // chart_of_accounts_v2 rows hold no description at all. Served as-is they would
+    // read as "the customer wrote none"; the v3 key makes every reader fetch afresh once.
+    $store = new ArrayLookupStore;
+    $store->seed(connection(), 'chart_of_accounts_v2', [
+        ['id' => 'stale', 'name' => 'Stale Expenses', 'code' => '400', 'class' => 'expense'],
+    ]);
+    $fake = fakeHttp();
+    $fake->queue(200, accountsPayload());
+
+    $accounts = xeroWithStore($fake, $store)->chartOfAccounts(connection());
+
+    expect(AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS)->toBe('chart_of_accounts_v3')
+        ->and($fake->requests)->toHaveCount(1)
+        ->and(array_map(fn (Account $a): string => $a->id, $accounts))->not->toContain('stale');
+});
+
 it('writes a fetched list into the durable store', function () {
     $store = new ArrayLookupStore;
     $fake = fakeHttp();

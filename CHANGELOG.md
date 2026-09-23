@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Account::$description` (nullable string), mapped from Xero's account `Description` (an
+  empty one reads as null) and carried through `toArray()` / `fromArray()` as `description`.
+  A stored payload without the field hydrates with `description` null.
+
+### Changed
+
+- `AccountingConnector::LOOKUP_CHART_OF_ACCOUNTS` is `chart_of_accounts_v3`, so chart rows
+  stored before `description` existed are bypassed and fetched afresh once rather than read
+  as accounts with no description.
+- `DatabaseLookupStore` scopes every row to the connection's tenant: `lookup_key` is stored
+  as `<key>@<first 16 hex of sha256(tenant id)>`, the hash `Connection::cacheKey()` uses. An
+  owner that reconnects to a different Xero organization or QuickBooks company is never
+  served the previous company's lists. Rows written by 0.2.0 carry no tenant and are treated
+  as a miss; no migration is needed, and `flush()` still clears every tenant of an owner.
+  `get()`, `put()` and `syncedAt()` keep their signatures.
+
+## [0.2.0] - 2026-09-20
+
 ### Changed
 
 - Every bank transaction write that echoes line amounts (the recode, the delete) carries

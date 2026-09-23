@@ -49,8 +49,11 @@ interface AccountingConnector
      * leaves the old rows behind and makes every reader fetch afresh once. A host
      * that asks the store about the chart (its last sync time, say) must use this
      * constant, never the literal.
+     *
+     * v3: `description` joined Account. A v2 row would hydrate every description as
+     * null, which reads as "the customer wrote none" rather than "not fetched yet".
      */
-    public const LOOKUP_CHART_OF_ACCOUNTS = 'chart_of_accounts_v2';
+    public const LOOKUP_CHART_OF_ACCOUNTS = 'chart_of_accounts_v3';
 
     public function provider(): Provider;
 

@@ -18,6 +18,16 @@ use Illuminate\Database\Query\Builder;
  *
  * Rows are keyed by owner and provider rather than by a connection's surrogate id,
  * so a reconnect that replaces the connection row does not orphan the cached lists.
+ *
+ * The tenant goes into `lookup_key` as a suffix, `<key>@<16 hex of sha256(tenant)>`,
+ * the same hash Connection::cacheKey() uses. An owner that reconnects to a different
+ * Xero organization or QuickBooks company must never be served the old company's
+ * chart, and the fast cache was already scoped this way while this table was not.
+ * Carrying it in the key rather than a new column means a host's published table
+ * needs no migration, and every row written before the suffix existed is simply
+ * never matched again: a miss, never another tenant's list. flush() still clears
+ * every tenant an owner has had. Keys the connector passes stay well inside the
+ * column's 64 characters with the 17 the suffix adds.
  */
 final class DatabaseLookupStore implements LookupStore
 {
@@ -38,7 +48,7 @@ final class DatabaseLookupStore implements LookupStore
         $payload = $this->query()
             ->where('owner_id', $owner)
             ->where('provider', $connection->provider->value)
-            ->where('lookup_key', $key)
+            ->where('lookup_key', $this->storedKey($connection, $key))
             ->value('payload');
 
         if (! is_string($payload)) {
@@ -65,7 +75,7 @@ final class DatabaseLookupStore implements LookupStore
             [[
                 'owner_id' => $owner,
                 'provider' => $connection->provider->value,
-                'lookup_key' => $key,
+                'lookup_key' => $this->storedKey($connection, $key),
                 'payload' => json_encode($records, JSON_THROW_ON_ERROR),
                 'synced_at' => $now,
                 'created_at' => $now,
@@ -93,7 +103,7 @@ final class DatabaseLookupStore implements LookupStore
         $value = $this->query()
             ->where('owner_id', $owner)
             ->where('provider', $connection->provider->value)
-            ->where('lookup_key', $key)
+            ->where('lookup_key', $this->storedKey($connection, $key))
             ->value('synced_at');
 
         return $value === null ? null : (string) $value;
@@ -114,6 +124,14 @@ final class DatabaseLookupStore implements LookupStore
             ->where('owner_id', $owner)
             ->where('provider', $connection->provider->value)
             ->delete();
+    }
+
+    /**
+     * The lookup key as stored: the connector's key scoped to the connection's tenant.
+     */
+    private function storedKey(Connection $connection, string $key): string
+    {
+        return $key.'@'.substr(hash('sha256', $connection->tenantId), 0, 16);
     }
 
     private function query(): Builder
