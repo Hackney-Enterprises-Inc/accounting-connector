@@ -533,6 +533,7 @@ An `[Unreleased]` heading or a previously tagged version uses the automatic patc
 
 Automatic patches tag the merge commit unchanged and use GitHub-generated release notes;
 explicit versions use their changelog section. Reruns reuse a tag already on that commit.
+An older untagged commit cannot receive a new version after a descendant has been tagged.
 The manual release dispatch accepts an existing `v`-prefixed tag to retry publication.
 Overlapping runs are allowed; if they choose the same tag, the conflicting push fails visibly
 and can be rerun to resolve the next version.

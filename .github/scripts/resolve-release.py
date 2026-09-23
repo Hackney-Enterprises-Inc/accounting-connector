@@ -12,7 +12,7 @@ def git(*args):
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
-def resolve(event, ref_type, ref_name, input_tag, sha, heading, tags):
+def resolve(event, ref_type, ref_name, input_tag, sha, heading, tags, is_ancestor):
     if event == "workflow_dispatch" or ref_type == "tag":
         tag = input_tag if event == "workflow_dispatch" else ref_name
         if not re.fullmatch("v" + VERSION, tag):
@@ -36,6 +36,10 @@ def resolve(event, ref_type, ref_name, input_tag, sha, heading, tags):
         automatic = not heading.startswith(f"## [{tag.removeprefix('v')}] - ")
         return tag, "verify-only", f"refs/tags/{tag}", automatic
 
+    for tag, (_, commit) in versions.items():
+        if is_ancestor(sha, commit):
+            raise ValueError(f"Cannot release {sha}: existing version tag {tag} is on a descendant")
+
     match = re.fullmatch(r"## \[(" + VERSION + r")\] - .+", heading)
     if heading != "## [Unreleased]" and match is None:
         raise ValueError("First changelog heading must be [Unreleased] or a dated version")
@@ -50,8 +54,17 @@ def resolve(event, ref_type, ref_name, input_tag, sha, heading, tags):
     return f"v{major}.{minor}.{patch + 1}", "tag", sha, True
 
 
+def is_ancestor(older, newer):
+    result = subprocess.run(["git", "merge-base", "--is-ancestor", older, newer],
+                            check=False)
+    if result.returncode not in (0, 1):
+        raise subprocess.CalledProcessError(result.returncode, result.args)
+    return result.returncode == 0
+
+
 def main():
     # A failed remote lookup must fail the run, not appear to be an empty tag list.
+    git("fetch", "--tags", "origin")
     refs = git("ls-remote", "--tags", "origin")
     tags = {}
     for line in refs.splitlines():
@@ -74,7 +87,7 @@ def main():
                    if line.startswith("## "))
     tag, needed, ref, automatic = resolve(
         os.environ["EVENT_NAME"], os.environ["REF_TYPE"], os.environ["REF_NAME"],
-        os.environ.get("INPUT_TAG", ""), os.environ["SHA"], heading, tags,
+        os.environ.get("INPUT_TAG", ""), os.environ["SHA"], heading, tags, is_ancestor,
     )
     outputs = dict(tag=tag, version=tag.removeprefix("v"), needed=needed, ref=ref,
                    automatic=str(automatic).lower())
