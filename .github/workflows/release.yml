@@ -24,13 +24,6 @@ on:
 permissions:
   contents: read
 
-# Two pushes to main in flight with a released heading on top would both resolve
-# to `tag`, and the second's tag push would be refused after its gates had run.
-# Runs queue instead of cancelling, so a release that is mid-gate finishes.
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 jobs:
   resolve:
     name: resolve the version
