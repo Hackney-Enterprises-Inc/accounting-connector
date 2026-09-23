@@ -53,8 +53,8 @@ resulting lock entry names the Packagist dist again.
 ## What this is
 
 A provider layer, not an accounting system. It knows how to talk to Xero and Intuit and nothing
-else. It has no database, no queue, no models, no opinion about what a tenant is, and no idea
-whether a given document is ready to sync.
+else. The core has no database, queue or models; the optional Laravel integration supplies
+database-backed stores. Your application decides whether a document is ready to sync.
 
 It exists because two products needed the same provider layer and neither wanted to own it twice.
 
@@ -138,7 +138,7 @@ serves the old organisation's chart of accounts until refreshed.
 per-connection settings. It is deliberately not company-shaped, so the package works for an app
 whose tenant is an `Organization` and one whose tenant is a `Company` without knowing the difference.
 
-Tokens arrive already decrypted. **The package never encrypts and never persists.** Your app owns
+Tokens arrive at the core already decrypted. Your app owns
 the key; the shipped Laravel repository encrypts with the application key, and a host that stores
 tokens itself uses its own `encrypted` cast.
 
@@ -266,9 +266,41 @@ It also caches contact resolution, which removes a round trip per contact per po
 the refresh token lapsed. Stop dispatching jobs for that connection and tell somebody. Retrying
 achieves nothing. (But see the concurrency note above before treating the first one as gospel.)
 
+## Existing bank transactions (Xero)
+
+Xero implements three optional contracts beyond `AccountingConnector`. Check them with
+`instanceof` before use; the QuickBooks connector does not implement them.
+
+| Contract | Methods | Purpose |
+|---|---|---|
+| `ReadsBankTransactions` | `listBankTransactions()`, `findBankTransaction()` | Page through existing transactions or re-read one before matching |
+| `CodesBankTransactions` | `recodeBankTransaction()`, `updateBankTransactionCoding()`, `deleteBankTransaction()` | Change coding or delete a transaction |
+| `FindsContacts` | `findContactByName()` | Find an existing contact without creating one |
+
+`BankTransactionQuery` defaults to spend transactions; pass `type: null` for all types.
+It accepts date, bank-account, status and modified-since filters, ordering and page size.
+Use `nextPage()` to advance and `BankTransactionPage::hasMore()` to check for another page.
+The default page size is 250, configurable through `bank_transactions.page_size` in Laravel or
+`XeroConnector::usingBankTransactionPageSize()` otherwise; a query can override it with `pageSize`.
+
+For a recode, pass a `BankTransactionChange` containing `LineCoding` entries and optionally a
+contact id, plus `RecodeExpectation::from($transaction)` from the read used to decide the change.
+The connector re-reads before writing and rejects stale expectations, except when the read
+already shows the requested change applied. That recovery returns `RecodeResult` with
+`recovered: true` without another write; its `before` reconstructs the expected coding over the
+current read. Otherwise the result carries the actual before and after states.
+
+Tax checks can refuse a recode before writing. If a completed write changes monetary values,
+`RecodeMovedMoneyException` carries both states for review. Pass an idempotency key for retries.
+The older `updateBankTransactionCoding()` wrapper has no expectation check.
+
+Before calling `deleteBankTransaction()`, the host must verify on a fresh read that the
+transaction belongs to it and is live, authorised and unreconciled. The method does not enforce
+those ownership and reconciliation checks itself.
+
 ## Events
 
-The package emits PSR-14 events and persists nothing. Every event extends `SyncEvent` and has a
+The package emits PSR-14 events; storing those events is the host's responsibility. Every event extends `SyncEvent` and has a
 `context()` array that is safe to write straight to a database column — no tokens, ever.
 
 | Event | When | The field that matters |
@@ -299,6 +331,8 @@ Everything the package throws extends `AccountingConnectorException`, which carr
 | `RateLimitException` | 429 and the retry budget is spent; carries `retryAfter` | later |
 | `ServerException` | provider 5xx or transport failure, retries exhausted | later — always with an idempotency key |
 | `UnsupportedEntityTypeException` | this provider cannot represent the type | check `supports()` first |
+| `PreconditionFailedException` | recode expectation is stale; carries `fresh` and `differences` | review the fresh state before deciding again |
+| `RecodeMovedMoneyException` | recode landed but changed monetary values; carries `before`, `after` and `differences` | human review |
 
 ## Rate limits
 
@@ -380,6 +414,9 @@ All keys live in `config/accounting-connector.php` after publishing.
 | `quickbooks.base_url` | `QUICKBOOKS_BASE_URL` | production | point at `https://sandbox-quickbooks.api.intuit.com` for a sandbox company |
 | `quickbooks.minor_version` | `QUICKBOOKS_MINOR_VERSION` | `75` | Intuit API minor version; pin deliberately, re-test when moved |
 | `http.max_retries` | `ACCOUNTING_CONNECTOR_MAX_RETRIES` | `3` | retries for 429/5xx/transport only |
+| `http.timeout` | `ACCOUNTING_CONNECTOR_HTTP_TIMEOUT` | `30` | total request timeout in seconds |
+| `http.connect_timeout` | `ACCOUNTING_CONNECTOR_HTTP_CONNECT_TIMEOUT` | `10` | connection timeout in seconds |
+| `bank_transactions.page_size` | `ACCOUNTING_CONNECTOR_BANK_TRANSACTION_PAGE_SIZE` | `250` | default Xero bank-transaction page size |
 | `cache.enabled` / `store` / `ttl` | `ACCOUNTING_CONNECTOR_CACHE*` | on / default store / 3600 | the PSR-16 layer in front of lookups |
 | `connections.enabled` / `connection` / `table` | `ACCOUNTING_CONNECTOR_CONNECTIONS`, `ACCOUNTING_CONNECTOR_DB_CONNECTION` | on | the shipped connection repository + store |
 | `lookups.enabled` / `connection` / `table` | `ACCOUNTING_CONNECTOR_LOOKUP_STORE` | on | the durable lookup store |
@@ -447,6 +484,10 @@ wrong payload fails in the test rather than in production.
 For testing the connectors themselves, `FakeHttpClient` is a PSR-18 client that answers from a
 queue, and `tests/Fixtures/{xero,quickbooks}/` holds doc-derived JSON responses for both
 providers.
+
+`FakeConnector` also implements the three optional bank-transaction and contact contracts.
+Seed it with `withBankTransactions(...)` and `withContacts(...)` to test matching and recoding
+without HTTP calls.
 
 ## Provider differences that are not portable
 
