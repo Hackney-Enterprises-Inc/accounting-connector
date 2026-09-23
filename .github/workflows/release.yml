@@ -1,0 +1,283 @@
+name: release
+
+# Releasing is a merge. The first `## ` heading of CHANGELOG.md names the version:
+# `## [Unreleased]` means "not yet", and `## [X.Y.Z] - date` on top of main with
+# no vX.Y.Z (or bare X.Y.Z) tag means "release this": run the gates on that
+# commit, tag it vX.Y.Z, publish the GitHub release with that section as the
+# notes. Packagist picks the tag up through its GitHub hook, so the merge is the
+# whole publish step. A merge whose top heading is already tagged AND released is
+# an ordinary merge; tagged but not released (a publish that failed after the tag
+# job) is republished from the tag's own tree. A hand tag or a dispatch still
+# works: the tag names the version and the gates and the notes read the tree at
+# that tag.
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to publish a release for
+        required: true
+
+permissions:
+  contents: read
+
+# Two pushes to main in flight with a released heading on top would both resolve
+# to `tag`, and the second's tag push would be refused after its gates had run.
+# Runs queue instead of cancelling, so a release that is mid-gate finishes.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve the version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      needed: ${{ steps.resolve.outputs.needed }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # `needed` is `no` (nothing past this job), `tag` (a merge to main whose top
+      # heading is an untagged version: verify, tag, publish) or `verify-only` (a
+      # hand tag or a dispatch: verify, publish). `ref` is the commit the gates run
+      # on, the archive is cut from and the notes are read at: the pushed sha on a
+      # merge, the tag itself otherwise (on a dispatch the runner's checkout is the
+      # default branch, so without it the gates would read main's CHANGELOG rather
+      # than the tag's).
+      # Every event field goes through env, never interpolated into the script: the
+      # dispatch input and a pushed ref name are typed by a person, and a value in
+      # a variable is a string where a value in the source is code.
+      - id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          heading=$(grep -m1 -E '^## ' CHANGELOG.md)
+          if [ "$EVENT_NAME" != "push" ] || [ "$REF_TYPE" = "tag" ]; then
+            # a hand tag or a dispatch: the tag names the version and is also the
+            # ref the gates and the notes read
+            TAG="${INPUT_TAG:-$REF_NAME}"; NEEDED=verify-only; REF="$TAG"
+          elif printf '%s' "$heading" | grep -Eq '^## \[Unreleased\]'; then
+            NEEDED=no; TAG=""; REF=""
+          else
+            VERSION=$(printf '%s' "$heading" | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)\].*/\1/')
+            TAG="v${VERSION}"; REF="$SHA"; NEEDED=tag
+          fi
+          # Every path that set a tag is checked here, by name, before anything reads
+          # it: a dispatch input, a pushed ref name, or a heading that is not a semver
+          # version (the sed leaves it unchanged). verify repeats the check on the
+          # output as belt and braces.
+          if [ -n "$TAG" ] && ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            printf '::error::[%s] is not a semver tag (expected vMAJOR.MINOR.PATCH)\n' "$TAG"
+            exit 1
+          fi
+          # On the merge path an existing tag is checked three ways. The bare spelling
+          # (the hand-tagged 0.2.0) is released for good and is never re-cut as v0.2.0.
+          # A v tag with a GitHub release is an ordinary merge: the tag IS the release
+          # Packagist and a consumer's lock read, and it points at an older commit, so
+          # main is never re-verified for it. A v tag with NO release is a publish that
+          # failed after the tag job: it takes the hand-tag path, which verifies the
+          # tag's own tree and publishes, and the tag job is skipped because NEEDED is
+          # not tag.
+          if [ "$NEEDED" = "tag" ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/${TAG#v}" >/dev/null; then
+              NEEDED=no
+              echo "::notice::${TAG#v} is already tagged in the bare spelling; nothing to release"
+            elif git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null; then
+              if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+                NEEDED=no
+              else
+                NEEDED=verify-only; REF="$TAG"
+                echo "::notice::${TAG} is tagged but has no GitHub release; republishing from the tag"
+              fi
+            fi
+          fi
+          echo "first heading: ${heading}"
+          echo "needed=${NEEDED} tag=${TAG} ref=${REF}"
+          {
+            echo "tag=${TAG}"
+            echo "version=${TAG#v}"
+            echo "needed=${NEEDED}"
+            echo "ref=${REF}"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: verify the release commit
+    needs: resolve
+    if: needs.resolve.outputs.needed != 'no'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          fetch-depth: 0
+
+      # Packagist reads the tag, so a tag that does not match semver publishes a
+      # version nobody can require.
+      - name: the tag is semver
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            printf '::error::[%s] is not a semver tag (expected vMAJOR.MINOR.PATCH)\n' "$TAG"
+            exit 1
+          fi
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      # PSR implementation packages intentionally use wildcard constraints.
+      # Skip constraint warnings while keeping other validation strict.
+      - run: composer validate --strict --no-check-all
+
+      - uses: ramsey/composer-install@v3
+
+      # The three gates, the same ones tests.yml runs on every push.
+      - run: vendor/bin/pint --test
+      - run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
+      - run: vendor/bin/pest --ci --fail-on-empty-test-suite
+
+      # The FIRST heading, anchored and escaped: `## [0.3.0]` must not match
+      # `## [0.3.0-rc1]`, and a version with a section further down is not the
+      # release on top. The bare 0.2.0 tag was cut on a tree whose top heading still
+      # read [Unreleased]; this is the gate that would have refused it.
+      - name: the first changelog heading is this version
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          pattern="^## \[${VERSION//./\\.}\] "
+          if ! grep -m1 -E '^## ' CHANGELOG.md | grep -Eq "$pattern"; then
+            echo "::error::the first heading of CHANGELOG.md is not [${VERSION}]: $(grep -m1 -E '^## ' CHANGELOG.md)"
+            exit 1
+          fi
+
+      # The archive Packagist serves is `git archive` of the tag, filtered by the
+      # export-ignore rules in .gitattributes. Development files must not ship, and a
+      # credential must never ship: a token file is gitignored, so it can only reach
+      # a tag through `git add -f`, which is exactly the case .gitignore cannot catch,
+      # and publishing one is not something a later commit undoes.
+      - name: the dist archive carries no development files
+        run: |
+          git archive --format=tar HEAD > /tmp/release-check.tar
+          echo "--- archive contents ---"
+          tar -tf /tmp/release-check.tar | sed 's/^/  /'
+          if tar -tf /tmp/release-check.tar | grep -Ei '(^|/)(tests|\.github|docs|\.claude|build)/|(^|/)CLAUDE\.md$'; then
+            echo "::error::Development files leaked into the dist archive. Check the export-ignore rules in .gitattributes."
+            exit 1
+          fi
+          if tar -tf /tmp/release-check.tar | grep -Ei '(^|/)[^/]*\.(token|env|pem|p12|jks)$|(^|/)\.env(\.|$)|(^|/)[^/]*token[^/]*\.json$'; then
+            echo "::error::A credential-shaped file is in the dist archive. Revoke it now, then remove it from the tag."
+            exit 1
+          fi
+          for path in src/Contracts/AccountingConnector.php src/Testing/FakeConnector.php composer.json LICENSE README.md CHANGELOG.md; do
+            if ! tar -tf /tmp/release-check.tar "$path" > /dev/null 2>&1; then
+              echo "::error::[$path] is missing from the release archive"
+              exit 1
+            fi
+          done
+          echo "Archive is clean."
+
+  tag:
+    name: tag the release commit
+    needs: [resolve, verify]
+    if: needs.resolve.outputs.needed == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      # A LIGHTWEIGHT tag: an annotated one needs a committer identity, which a
+      # runner has none of, and the notes live on the GitHub release rather than
+      # in a tag object. A push made with GITHUB_TOKEN never starts a workflow
+      # run, so this does not re-trigger the `v*` path; the publish step is the
+      # next job, not a second run. Packagist's GitHub hook reads the tag and lists
+      # the version within a minute.
+      - name: tag
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+
+  publish:
+    name: publish the github release
+    needs: [resolve, verify, tag]
+    # `success` after `tag` on a merge, `skipped` on a hand tag or a dispatch. A
+    # FAILED tag job must not publish: `gh release create` on a tag that does not
+    # exist creates the tag itself, at whatever main had moved to by then.
+    if: >-
+      always()
+      && needs.resolve.outputs.needed != 'no'
+      && needs.verify.result == 'success'
+      && (needs.tag.result == 'success' || needs.tag.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          fetch-depth: 0
+
+      # The release notes are the changelog section for this version, so the two can
+      # never drift apart. The same anchored pattern as the gate in verify; it goes
+      # through ENVIRON rather than -v so awk never sees the backslashes as escapes.
+      - name: extract the changelog section
+        id: notes
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          export PATTERN="^## \[${VERSION//./\\.}\] "
+          awk '
+            $0 ~ ENVIRON["PATTERN"] { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          echo "Release notes:"
+          cat /tmp/notes.md
+
+      # Idempotent: a release that already exists (a dispatch after a half-finished
+      # run, a republish) is updated in place rather than refused, so a re-run is
+      # always safe. --target is unused when the tag exists (the merge path tagged
+      # it in the job before, a hand tag brought it) and the right commit if it
+      # ever does not.
+      - name: create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TARGET: ${{ github.sha }}
+        run: |
+          prerelease=--prerelease=false
+          case "$VERSION" in
+            *-*) prerelease=--prerelease ;;
+          esac
+          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+            echo "release ${TAG} exists: updating its title, notes and prerelease flag"
+            gh release edit "$TAG" --title "$TAG" --notes-file /tmp/notes.md "$prerelease"
+          else
+            echo "release ${TAG} does not exist: creating it"
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --target "$TARGET" "$prerelease"
+          fi

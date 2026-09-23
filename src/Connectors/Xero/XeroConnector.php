@@ -796,6 +796,7 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
                 currency: isset($account['CurrencyCode']) ? (string) $account['CurrencyCode'] : null,
                 bankAccountNumber: isset($account['BankAccountNumber']) ? (string) $account['BankAccountNumber'] : null,
                 systemAccount: isset($account['SystemAccount']) && $account['SystemAccount'] !== '' ? (string) $account['SystemAccount'] : null,
+                description: isset($account['Description']) && $account['Description'] !== '' ? (string) $account['Description'] : null,
             );
         }
 

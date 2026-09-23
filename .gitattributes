@@ -1,0 +1,19 @@
+# What Packagist serves is `git archive` of the tag filtered by these rules. Only
+# what a consumer needs ships: src/, composer.json, LICENSE, README.md and
+# CHANGELOG.md. Everything below is development tooling or private working notes;
+# release.yml refuses a tag whose archive carries any of it.
+/.claude              export-ignore
+/.github              export-ignore
+/build                export-ignore
+/docs                 export-ignore
+/tests                export-ignore
+/.env.contract.example export-ignore
+/.gitattributes       export-ignore
+/.gitignore           export-ignore
+/CLAUDE.md            export-ignore
+/phpstan.neon         export-ignore
+/phpunit.contract.xml export-ignore
+/phpunit.xml.dist     export-ignore
+/pint.json            export-ignore
+
+* text=auto eol=lf
