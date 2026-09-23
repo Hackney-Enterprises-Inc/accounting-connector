@@ -77,6 +77,13 @@ jobs:
             printf '::error::[%s] is not a semver tag (expected vMAJOR.MINOR.PATCH)\n' "$TAG"
             exit 1
           fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              printf '::error::Tag [%s] does not exist on origin or could not be verified\n' "$TAG"
+              exit 1
+            fi
+            REF="refs/tags/$TAG"
+          fi
           # On the merge path an existing tag is checked three ways. The bare spelling
           # (the hand-tagged 0.2.0) is released for good and is never re-cut as v0.2.0.
           # A v tag with a GitHub release is an ordinary merge: the tag IS the release
