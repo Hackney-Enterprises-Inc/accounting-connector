@@ -37,6 +37,12 @@ final readonly class Account implements LookupRecord
          * rule target has to be able to leave these out.
          */
         public ?string $systemAccount = null,
+        /**
+         * The account's free-text description, as the provider holds it. Xero's
+         * Description; null when absent or empty, and on lists stored before the
+         * field existed.
+         */
+        public ?string $description = null,
     ) {}
 
     /**
@@ -110,6 +116,7 @@ final readonly class Account implements LookupRecord
             'currency' => $this->currency,
             'bank_account_number' => $this->bankAccountNumber,
             'system_account' => $this->systemAccount,
+            'description' => $this->description,
         ];
     }
 
@@ -128,6 +135,7 @@ final readonly class Account implements LookupRecord
             currency: isset($data['currency']) ? (string) $data['currency'] : null,
             bankAccountNumber: isset($data['bank_account_number']) ? (string) $data['bank_account_number'] : null,
             systemAccount: isset($data['system_account']) && $data['system_account'] !== '' ? (string) $data['system_account'] : null,
+            description: isset($data['description']) && $data['description'] !== '' ? (string) $data['description'] : null,
         );
     }
 }
