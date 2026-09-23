@@ -268,7 +268,7 @@ achieves nothing. (But see the concurrency note above before treating the first 
 
 ## Existing bank transactions (Xero)
 
-Xero implements three optional contracts beyond `AccountingConnector`. Check them with
+Xero implements four optional contracts beyond `AccountingConnector`. Check them with
 `instanceof` before use; the QuickBooks connector does not implement them.
 
 | Contract | Methods | Purpose |
@@ -276,12 +276,22 @@ Xero implements three optional contracts beyond `AccountingConnector`. Check the
 | `ReadsBankTransactions` | `listBankTransactions()`, `findBankTransaction()` | Page through existing transactions or re-read one before matching |
 | `CodesBankTransactions` | `recodeBankTransaction()`, `updateBankTransactionCoding()`, `deleteBankTransaction()` | Change coding or delete a transaction |
 | `FindsContacts` | `findContactByName()` | Find an existing contact without creating one |
+| `ListsContacts` | `contacts()` | Walk every contact, archived and merged ones included, optionally only those changed since an instant |
 
 `BankTransactionQuery` defaults to spend transactions; pass `type: null` for all types.
 It accepts date, bank-account, status and modified-since filters, ordering and page size.
 Use `nextPage()` to advance and `BankTransactionPage::hasMore()` to check for another page.
 The default page size is 250, configurable through `bank_transactions.page_size` in Laravel or
 `XeroConnector::usingBankTransactionPageSize()` otherwise; a query can override it with `pageSize`.
+
+`contacts()` pages Xero's contact list 100 at a time as you iterate, so a caller that stops early
+makes no further requests. Every contact comes back, customers and archived ones included: Xero
+only sets `isSupplier` from bills, so a vendor paid by card is never flagged and the flag is
+information, not a filter. A merged contact is archived and names the survivor in
+`mergedToContactId`. Pass `$modifiedSince` to receive only contacts changed after that instant;
+Xero excludes changes that only touched the supplier or customer flag, so reconcile with a full
+listing now and then. Upsert by id, and keep the sync start time as the next cutoff only after
+a complete walk.
 
 For a recode, pass a `BankTransactionChange` containing `LineCoding` entries and optionally a
 contact id, plus `RecodeExpectation::from($transaction)` from the read used to decide the change.
@@ -485,9 +495,10 @@ For testing the connectors themselves, `FakeHttpClient` is a PSR-18 client that 
 queue, and `tests/Fixtures/{xero,quickbooks}/` holds doc-derived JSON responses for both
 providers.
 
-`FakeConnector` also implements the three optional bank-transaction and contact contracts.
-Seed it with `withBankTransactions(...)` and `withContacts(...)` to test matching and recoding
-without HTTP calls.
+`FakeConnector` also implements the four optional bank-transaction and contact contracts.
+Seed it with `withBankTransactions(...)` and `withContacts(...)` to test matching, recoding and
+contact syncing without HTTP calls; `contacts()` honours `$modifiedSince` against each seeded
+contact's `updatedAt` and records every call in `$contactListings`.
 
 ## Provider differences that are not portable
 

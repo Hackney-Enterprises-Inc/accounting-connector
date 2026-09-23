@@ -11,6 +11,7 @@ use Hei\AccountingConnector\Connectors\AbstractConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
+use Hei\AccountingConnector\Contracts\ListsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
@@ -73,8 +74,13 @@ use Hei\AccountingConnector\Support\RecodeInvariants;
  * HttpClient honours Retry-After and asks a RequestGate before every attempt; the
  * host still needs to keep its queue concurrency modest and to budget a long walk.
  */
-final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, ReadsBankTransactions
+final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions
 {
+    /** Contacts per GET Contacts page; Xero's own default and documented page size. */
+    public const CONTACT_PAGE_SIZE = 100;
+
+    private const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
+
     public const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 
     public const TOKEN_URL = 'https://identity.xero.com/connect/token';
@@ -1305,12 +1311,81 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             return null;
         }
 
+        return $this->contact($row, $name);
+    }
+
+    /**
+     * Every contact, customers and archived ones included, paged as the caller
+     * iterates (see ListsContacts for why nothing is filtered by supplier).
+     *
+     * GET Contacts with `page` and `pageSize` 100 and `includeArchived=true`. Paging is
+     * also what makes Xero return MergedToContactID at all: its docs say the field is
+     * "only returned when using paging or when fetching a contact by ContactId". The
+     * `summaryOnly` option is deliberately not used: Xero documents that it drops
+     * IsSupplier and IsCustomer among others, and a flag silently missing would read
+     * as false. Ordered by the immutable ContactID: sorting by UpdatedDateUTC
+     * would move an edited contact to the end and shift untouched contacts across
+     * page boundaries, potentially skipping them. This is still a live listing,
+     * not a snapshot; additions or removals can change page membership. A 304 answer to
+     * If-Modified-Since means nothing changed and ends the listing. Each page re-checks
+     * the token, so a long walk survives an access token expiring part way.
+     *
+     * @return \Generator<int, Contact>
+     */
+    public function contacts(Connection $connection, ?DateTimeInterface $modifiedSince = null): iterable
+    {
+        $since = $modifiedSince === null ? null : DateTimeImmutable::createFromInterface($modifiedSince);
+        $page = 1;
+
+        do {
+            $connection = $this->fresh($connection);
+
+            $response = $this->get($connection, 'Contacts', [
+                'page' => $page,
+                'pageSize' => self::CONTACT_PAGE_SIZE,
+                'includeArchived' => 'true',
+                'order' => 'ContactID ASC',
+            ], $this->modifiedSinceHeader($since));
+
+            if ($response->status === 304) {
+                return;
+            }
+
+            if ($response->failed()) {
+                $this->raise($response, $connection, 'the contact list');
+            }
+
+            $rows = $response->get('Contacts', []);
+            $rows = is_array($rows) ? $rows : [];
+
+            foreach ($rows as $row) {
+                if (is_array($row) && is_string($row['ContactID'] ?? null) && $row['ContactID'] !== '') {
+                    yield $this->contact($row);
+                }
+            }
+
+            $pageCount = $response->get('pagination.pageCount');
+            $more = is_numeric($pageCount) ? $page < (int) $pageCount : count($rows) >= self::CONTACT_PAGE_SIZE;
+            $page++;
+        } while ($more && $rows !== []);
+    }
+
+    /**
+     * @param  array<string, mixed>  $row  One element of Xero's Contacts array.
+     */
+    private function contact(array $row, string $fallbackName = ''): Contact
+    {
+        $merged = $row['MergedToContactID'] ?? null;
+
         return new Contact(
-            id: $id,
-            name: (string) ($row['Name'] ?? $name),
-            status: isset($row['ContactStatus']) ? (string) $row['ContactStatus'] : null,
+            id: (string) $row['ContactID'],
+            name: (string) ($row['Name'] ?? $fallbackName),
+            status: isset($row['ContactStatus']) && $row['ContactStatus'] !== '' ? (string) $row['ContactStatus'] : null,
             isSupplier: (bool) ($row['IsSupplier'] ?? false),
             isCustomer: (bool) ($row['IsCustomer'] ?? false),
+            // An absent, empty or all-zero id all mean the contact was never merged.
+            mergedToContactId: is_string($merged) && $merged !== '' && $merged !== self::EMPTY_GUID ? $merged : null,
+            updatedAt: isset($row['UpdatedDateUTC']) && is_string($row['UpdatedDateUTC']) ? XeroDate::parse($row['UpdatedDateUTC']) : null,
         );
     }
 
