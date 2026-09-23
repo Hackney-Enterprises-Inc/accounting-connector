@@ -6,10 +6,12 @@ namespace Hei\AccountingConnector\Testing;
 
 use Closure;
 use DateTimeImmutable;
+use DateTimeInterface;
 use Hei\AccountingConnector\Contracts\AccountingConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
+use Hei\AccountingConnector\Contracts\ListsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
@@ -60,7 +62,7 @@ use Throwable;
  *     expect($fake->created)->toHaveCount(1);
  *     expect($fake->createdOf(EntityType::Bill))->toHaveCount(1);
  */
-final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, ReadsBankTransactions
+final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions
 {
     /**
      * Every create, in order. `direction` is set for an expense so a host can assert a
@@ -135,8 +137,15 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
      */
     public array $deleted = [];
 
-    /** @var array<string, Contact> keyed by lowercased name */
+    /** @var array<string, Contact> keyed by contact id, in the order seeded */
     private array $knownContacts = [];
+
+    /**
+     * Every contacts() listing, in order: the modifiedSince it was asked with.
+     *
+     * @var array<int, DateTimeInterface|null>
+     */
+    public array $contactListings = [];
 
     /** Returned by the next recode instead of the applied change, then cleared. */
     private ?BankTransactionData $nextRecodeResult = null;
@@ -812,12 +821,14 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     }
 
     /**
-     * Stock the fake with contacts findContactByName() can answer with.
+     * Stock the fake with contacts, for findContactByName() and contacts() alike.
+     * Seeding a contact id again replaces that contact and moves it to the end of the listing.
      */
     public function withContacts(Contact ...$contacts): self
     {
         foreach ($contacts as $contact) {
-            $this->knownContacts[strtolower(trim($contact->name))] = $contact;
+            unset($this->knownContacts[$contact->id]);
+            $this->knownContacts[$contact->id] = $contact;
         }
 
         return $this;
@@ -829,7 +840,41 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
 
         $this->contactLookups[] = $name;
 
-        return $this->knownContacts[strtolower(trim($name))] ?? null;
+        $wanted = strtolower(trim($name));
+        $found = null;
+
+        // The most recently seeded contact of that name, as before.
+        foreach ($this->knownContacts as $contact) {
+            if (strtolower(trim($contact->name)) === $wanted) {
+                $found = $contact;
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Every seeded contact, customers and archived ones included, in the order seeded.
+     *
+     * With $modifiedSince, only contacts whose updatedAt is after it; a contact seeded
+     * without updatedAt counts as changed, so it is never silently hidden. Records the
+     * call in $contactListings and honours failLookups().
+     *
+     * @return \Generator<int, Contact>
+     */
+    public function contacts(Connection $connection, ?DateTimeInterface $modifiedSince = null): iterable
+    {
+        $since = $modifiedSince === null ? null : DateTimeImmutable::createFromInterface($modifiedSince);
+        $this->contactListings[] = $since;
+        $this->guardLookups();
+
+        foreach ($this->knownContacts as $contact) {
+            if ($since !== null && $contact->updatedAt !== null && $contact->updatedAt <= $since) {
+                continue;
+            }
+
+            yield $contact;
+        }
     }
 
     /**
@@ -1031,6 +1076,7 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         $this->changes = [];
         $this->deleted = [];
         $this->contactLookups = [];
+        $this->contactListings = [];
         $this->knownContacts = [];
         $this->nextRecodeResult = null;
         $this->mutateBeforeNextRecode = null;

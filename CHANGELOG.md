@@ -5,7 +5,29 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-09-23
+
+### Added
+
+- `ListsContacts`, an optional contract (ask with `instanceof`, like `ReadsBankTransactions`):
+  `contacts(Connection $connection, ?DateTimeInterface $modifiedSince = null): iterable<Contact>`.
+  The Xero connector implements it: `GET Contacts` paged 100 at a time with
+  `includeArchived=true`, ordered by `ContactID`, with `If-Modified-Since` when
+  `$modifiedSince` is given (a 304 yields nothing). Every contact is listed, customers and
+  non-suppliers included: Xero sets `IsSupplier` only from bills, so a vendor paid by card
+  or bank transfer is never flagged. Pages are fetched as the caller iterates. QuickBooks
+  does not implement it. Listings are not snapshots; hosts should periodically
+  reconcile in full, including supplier/customer flag-only changes that Xero excludes
+  from incremental results.
+- `Contact::$mergedToContactId` and `Contact::$updatedAt` (from Xero's `MergedToContactID`
+  and `UpdatedDateUTC`), carried by `toArray()` and the new `Contact::fromArray()`; a
+  payload stored without them hydrates with both null. `status` documents Xero's
+  ACTIVE / ARCHIVED / GDPRREQUEST.
+- `FakeConnector` implements `ListsContacts`: `withContacts()` seeds the listing (keyed by
+  contact id, re-seeding replaces), `contacts()` honours `$modifiedSince` against
+  `updatedAt`, records each call in `$contactListings`, and fails with `failLookups()`.
+
+## [0.2.1] - 2026-09-23
 
 ### Added
 
