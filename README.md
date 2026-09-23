@@ -525,6 +525,19 @@ declares its provider and is refused if handed to the other one.
 
 ## Quality gate
 
+Every push to `main` (including a merged pull request) publishes a release after the release
+quality gates pass. By default, the workflow increments the patch of the highest stable tag,
+recognising both `v0.2.0` and historical bare tags such as `0.2.0`. To select a minor or major
+version, put an untagged `## [X.Y.Z] - YYYY-MM-DD` heading first in `CHANGELOG.md` before merging.
+An `[Unreleased]` heading or a previously tagged version uses the automatic patch bump.
+
+Automatic patches tag the merge commit unchanged and use GitHub-generated release notes;
+explicit versions use their changelog section. Reruns reuse a tag already on that commit.
+An older untagged commit cannot receive a new version after a descendant has been tagged.
+The manual release dispatch accepts an existing `v`-prefixed tag to retry publication.
+Overlapping runs are allowed; if they choose the same tag, the conflicting push fails visibly
+and can be rerun to resolve the next version.
+
 ```
 composer test      # pest
 composer analyse   # phpstan level 8

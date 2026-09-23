@@ -8,7 +8,7 @@ on:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -16,7 +16,7 @@ jobs:
         dependencies: [prefer-lowest, prefer-stable]
     name: PHP ${{ matrix.php }} · ${{ matrix.dependencies }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -37,9 +37,12 @@ jobs:
   # its own releases, so checking formatting on a prefer-lowest Pint fails on
   # differences that are Pint's, not the code's.
   style:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
+      - name: Release resolver
+        run: python3 -m unittest discover -s .github/tests
 
       - uses: shivammathur/setup-php@v2
         with:
