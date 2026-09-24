@@ -1,0 +1,15 @@
+{
+    "ErrorNumber": 10,
+    "Type": "ValidationException",
+    "Message": "A validation exception occurred",
+    "Elements": [
+        {
+            "InvoiceID": "invoice-1",
+            "ValidationErrors": [
+                {
+                    "Message": "Invoice not of valid status for modification"
+                }
+            ]
+        }
+    ]
+}

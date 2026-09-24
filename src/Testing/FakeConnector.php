@@ -13,6 +13,7 @@ use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
 use Hei\AccountingConnector\Contracts\ListsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
+use Hei\AccountingConnector\Contracts\VoidsInvoices;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
@@ -27,6 +28,7 @@ use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Data\Contact;
 use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\ExpenseData;
+use Hei\AccountingConnector\Data\InvoiceState;
 use Hei\AccountingConnector\Data\LineCoding;
 use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
@@ -40,6 +42,7 @@ use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
+use Hei\AccountingConnector\Exceptions\InvoiceHasPaymentsException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\PreconditionFailedException;
 use Hei\AccountingConnector\Exceptions\RecodeMovedMoneyException;
@@ -62,7 +65,7 @@ use Throwable;
  *     expect($fake->created)->toHaveCount(1);
  *     expect($fake->createdOf(EntityType::Bill))->toHaveCount(1);
  */
-final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions
+final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions, VoidsInvoices
 {
     /**
      * Every create, in order. `direction` is set for an expense so a host can assert a
@@ -136,6 +139,23 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
      * @var array<int, array{external_id: string, idempotency_key: string|null}>
      */
     public array $deleted = [];
+
+    /**
+     * The invoices and bills this fake pretends the customer's books hold, keyed
+     * by id so a void changes one in place and a later findInvoice() sees it.
+     *
+     * @var array<string, InvoiceState>
+     */
+    public array $invoices = [];
+
+    /** @var array<int, array{invoice_id: string, idempotency_key: string|null}> */
+    public array $voided = [];
+
+    /** @var array<int, string> every findInvoice() id, in order */
+    public array $invoiceLookups = [];
+
+    /** Thrown by the next invoice read or void, then cleared. */
+    private ?Throwable $nextInvoiceFailure = null;
 
     /** @var array<string, Contact> keyed by contact id, in the order seeded */
     private array $knownContacts = [];
@@ -821,6 +841,105 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     }
 
     /**
+     * Stock the fake with invoices, for findInvoice() and voidInvoice() alike.
+     * Seeding an id again replaces that invoice.
+     */
+    public function withInvoices(InvoiceState ...$invoices): self
+    {
+        foreach ($invoices as $invoice) {
+            $this->invoices[$invoice->id] = $invoice;
+        }
+
+        return $this;
+    }
+
+    /**
+     * Make the next invoice read or void throw, then answer again.
+     */
+    public function failNextInvoiceCall(Throwable $exception): self
+    {
+        $this->nextInvoiceFailure = $exception;
+
+        return $this;
+    }
+
+    public function findInvoice(Connection $connection, string $invoiceId): ?InvoiceState
+    {
+        $this->guardInvoices();
+
+        $this->invoiceLookups[] = $invoiceId;
+
+        return $this->invoices[$invoiceId] ?? null;
+    }
+
+    /**
+     * The real connector's rules without the wire: an invoice already voided is
+     * returned as it is, one the fake never held answers as a 404 does (VOIDED by
+     * id), money applied refuses with the typed exception before anything changes,
+     * a draft is DELETED and an approved invoice VOIDED, and the result is kept so
+     * a later findInvoice() reports it.
+     */
+    public function voidInvoice(Connection $connection, string $invoiceId, ?string $idempotencyKey = null): InvoiceState
+    {
+        $this->guardInvoices();
+
+        $current = $this->invoices[$invoiceId] ?? null;
+
+        if ($current === null) {
+            $this->voided[] = ['invoice_id' => $invoiceId, 'idempotency_key' => $idempotencyKey];
+
+            return new InvoiceState(id: $invoiceId, status: 'VOIDED');
+        }
+
+        if ($current->isVoided()) {
+            return $current;
+        }
+
+        if ($current->hasPayments) {
+            throw new InvoiceHasPaymentsException(
+                sprintf('The invoice %s cannot be voided: money is applied to it. Remove the payment, credit note, prepayment or overpayment in Xero first.', $invoiceId),
+                $current,
+                $this->provider,
+            );
+        }
+
+        $this->voided[] = ['invoice_id' => $invoiceId, 'idempotency_key' => $idempotencyKey];
+
+        $after = new InvoiceState(
+            id: $current->id,
+            status: $current->voidTarget(),
+            type: $current->type,
+            invoiceNumber: $current->invoiceNumber,
+            reference: $current->reference,
+            date: $current->date,
+            total: $current->total,
+            amountDue: Money::zero(),
+            amountPaid: $current->amountPaid,
+            amountCredited: $current->amountCredited,
+            currency: $current->currency,
+            contactId: $current->contactId,
+            contactName: $current->contactName,
+            hasPayments: false,
+            hasAttachments: $current->hasAttachments,
+            updatedDateUtc: new DateTimeImmutable,
+        );
+
+        $this->invoices[$invoiceId] = $after;
+
+        return $after;
+    }
+
+    private function guardInvoices(): void
+    {
+        if ($this->nextInvoiceFailure !== null) {
+            $failure = $this->nextInvoiceFailure;
+            $this->nextInvoiceFailure = null;
+
+            throw $failure;
+        }
+    }
+
+    /**
      * Stock the fake with contacts, for findContactByName() and contacts() alike.
      * Seeding a contact id again replaces that contact and moves it to the end of the listing.
      */
@@ -1075,6 +1194,10 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         $this->recodings = [];
         $this->changes = [];
         $this->deleted = [];
+        $this->invoices = [];
+        $this->voided = [];
+        $this->invoiceLookups = [];
+        $this->nextInvoiceFailure = null;
         $this->contactLookups = [];
         $this->contactListings = [];
         $this->knownContacts = [];

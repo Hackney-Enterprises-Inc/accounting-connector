@@ -1,0 +1,15 @@
+{
+    "ErrorNumber": 10,
+    "Type": "ValidationException",
+    "Message": "A validation exception occurred",
+    "Elements": [
+        {
+            "InvoiceID": "invoice-1",
+            "ValidationErrors": [
+                {
+                    "Message": "Invoice cannot be voided as it has payments allocated to it"
+                }
+            ]
+        }
+    ]
+}

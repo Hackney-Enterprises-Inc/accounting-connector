@@ -268,7 +268,7 @@ achieves nothing. (But see the concurrency note above before treating the first 
 
 ## Existing bank transactions (Xero)
 
-Xero implements four optional contracts beyond `AccountingConnector`. Check them with
+Xero implements five optional contracts beyond `AccountingConnector`. Check them with
 `instanceof` before use; the QuickBooks connector does not implement them.
 
 | Contract | Methods | Purpose |
@@ -277,6 +277,7 @@ Xero implements four optional contracts beyond `AccountingConnector`. Check them
 | `CodesBankTransactions` | `recodeBankTransaction()`, `updateBankTransactionCoding()`, `deleteBankTransaction()` | Change coding or delete a transaction |
 | `FindsContacts` | `findContactByName()` | Find an existing contact without creating one |
 | `ListsContacts` | `contacts()` | Walk every contact, archived and merged ones included, optionally only those changed since an instant |
+| `VoidsInvoices` | `findInvoice()`, `voidInvoice()` | Re-read a posted bill's status, or take it out of the books when it should not have been posted |
 
 `BankTransactionQuery` defaults to spend transactions; pass `type: null` for all types.
 It accepts date, bank-account, status and modified-since filters, ordering and page size.
@@ -308,6 +309,18 @@ Before calling `deleteBankTransaction()`, the host must verify on a fresh read t
 transaction belongs to it and is live, authorised and unreconciled. The method does not enforce
 those ownership and reconciliation checks itself.
 
+`findInvoice()` returns an `InvoiceState` (status, type, amounts due, paid and credited, whether
+any payment, credit note, prepayment or overpayment is applied) or null when Xero no longer has
+the invoice. Read it before any write to a posted bill: Xero refuses to modify a PAID, VOIDED or
+DELETED invoice, and `isModifiable()` says so up front. `voidInvoice()` reads, then posts
+`Status: VOIDED` for an approved invoice or `DELETED` for a draft (the only status Xero accepts
+for one), then reads again and returns what Xero holds. An invoice already voided, or one Xero no
+longer has at all, comes back voided without a write, so a host has one shape for every way of
+being gone. Money applied stops a void: `InvoiceHasPaymentsException` is thrown before the write
+when the read shows it and after the write when Xero refuses, carrying Xero's own wording in
+`providerMessage`, and the person has to remove the payment in Xero first. Pass an idempotency
+key for retries.
+
 ## Events
 
 The package emits PSR-14 events; storing those events is the host's responsibility. Every event extends `SyncEvent` and has a
@@ -338,6 +351,7 @@ Everything the package throws extends `AccountingConnectorException`, which carr
 | `AuthenticationException` | credentials refused (401/403) and a refresh will not fix it | no |
 | `ConnectionRevokedException` | the grant is dead; carries the `Connection` | reconnect only |
 | `NotFoundException` | no such record (404) | no |
+| `InvoiceHasPaymentsException` | a void was refused because a payment, credit note, prepayment or overpayment is applied; `state` is the read, `providerMessage` Xero's words | after a person removes the allocation |
 | `RateLimitException` | 429 and the retry budget is spent; carries `retryAfter` | later |
 | `ServerException` | provider 5xx or transport failure, retries exhausted | later — always with an idempotency key |
 | `UnsupportedEntityTypeException` | this provider cannot represent the type | check `supports()` first |

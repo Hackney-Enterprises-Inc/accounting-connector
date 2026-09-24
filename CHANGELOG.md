@@ -5,6 +5,40 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-24
+
+### Added
+
+- `VoidsInvoices`, an optional contract (ask with `instanceof`, like `ListsContacts`):
+  `findInvoice(Connection $connection, string $invoiceId): ?InvoiceState` and
+  `voidInvoice(Connection $connection, string $invoiceId, ?string $idempotencyKey = null): InvoiceState`.
+  The Xero connector implements it for bills and sales invoices alike (one `Invoices`
+  resource). `findInvoice()` is one GET, null on a 404. `voidInvoice()` reads first, posts
+  `Status: VOIDED` for an AUTHORISED invoice or `DELETED` for a DRAFT or SUBMITTED one,
+  reads again and returns Xero's own status; an invoice already VOIDED or DELETED is
+  returned without a write, and one Xero no longer has (404 on the read or the write)
+  is returned as VOIDED by id, so a host has one shape for every way of being gone. A
+  void the re-read does not confirm is a `ValidationException`. QuickBooks does not
+  implement it.
+- `InvoiceState`: id, status, type (ACCPAY / ACCREC), invoice number, reference, date,
+  total, amount due, paid and credited, currency, contact, `hasPayments` (any payment,
+  credit note, prepayment or overpayment applied, or an amount paid or credited),
+  `hasAttachments`, `updatedDateUtc`; with `isVoided()`, `isPaid()`, `isModifiable()`
+  (DRAFT, SUBMITTED, AUTHORISED: the states Xero lets a replacing write touch) and
+  `voidTarget()`.
+- `InvoiceHasPaymentsException`: money is applied to the invoice, so it cannot be voided
+  until a person removes the allocation in Xero. Thrown before any write when the read
+  shows it (`state` carries the read) and after the write when Xero refuses with a
+  payment, credit note, prepayment, overpayment or allocation message (`providerMessage`
+  carries Xero's words). A refusal for any other reason stays a `ValidationException`,
+  including "Invoice not of valid status for modification" for a PAID invoice, which the
+  read reports as `isPaid()` first.
+- `FakeConnector` implements `VoidsInvoices`: `withInvoices()` seeds the books,
+  `findInvoice()` records each id in `$invoiceLookups`, `voidInvoice()` applies the real
+  connector's rules (already voided returns as is, unknown id is VOIDED by id, money
+  applied throws the typed exception, draft becomes DELETED) and records the call in
+  `$voided`; `failNextInvoiceCall()` fails the next read or void once.
+
 ## [0.3.0] - 2026-09-23
 
 ### Added

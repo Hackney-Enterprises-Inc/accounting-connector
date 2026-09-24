@@ -1,0 +1,55 @@
+{
+    "Id": "4f7c9d2e-1a3b-4e5f-8c6d-9b2a1e0f3d54",
+    "Status": "OK",
+    "ProviderName": "Mittro",
+    "DateTimeUTC": "/Date(1756400000000)/",
+    "Invoices": [
+        {
+            "Type": "ACCPAY",
+            "InvoiceID": "invoice-1",
+            "InvoiceNumber": "BILL-0042",
+            "Reference": "PO-7",
+            "Payments": [],
+            "CreditNotes": [],
+            "Prepayments": [],
+            "Overpayments": [],
+            "AmountDue": 0.0,
+            "AmountPaid": 0.0,
+            "SentToContact": false,
+            "IsDiscounted": false,
+            "HasAttachments": false,
+            "Contact": {
+                "ContactID": "contact-1",
+                "Name": "Acme Supply",
+                "Addresses": [],
+                "Phones": [],
+                "ContactGroups": [],
+                "ContactPersons": [],
+                "HasValidationErrors": false
+            },
+            "DateString": "2026-08-21T00:00:00",
+            "Date": "/Date(1755734400000+0000)/",
+            "Status": "DELETED",
+            "LineAmountTypes": "Exclusive",
+            "LineItems": [
+                {
+                    "Description": "Widgets",
+                    "UnitAmount": 25.0,
+                    "TaxType": "NONE",
+                    "TaxAmount": 0.0,
+                    "LineAmount": 75.0,
+                    "AccountCode": "400",
+                    "Tracking": [],
+                    "Quantity": 3.0,
+                    "LineItemID": "b12aa0d2-6ff0-4c50-8c4e-3f1b0a9d2e71",
+                    "AccountID": "exp-uuid"
+                }
+            ],
+            "SubTotal": 75.0,
+            "TotalTax": 0.0,
+            "Total": 75.0,
+            "UpdatedDateUTC": "/Date(1756400000000+0000)/",
+            "CurrencyCode": "USD"
+        }
+    ]
+}

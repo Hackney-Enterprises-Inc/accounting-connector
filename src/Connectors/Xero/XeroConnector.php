@@ -13,6 +13,7 @@ use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
 use Hei\AccountingConnector\Contracts\ListsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
+use Hei\AccountingConnector\Contracts\VoidsInvoices;
 use Hei\AccountingConnector\Data\Account;
 use Hei\AccountingConnector\Data\Attachment;
 use Hei\AccountingConnector\Data\AttachmentResult;
@@ -28,6 +29,7 @@ use Hei\AccountingConnector\Data\Contact;
 use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\ExpenseData;
 use Hei\AccountingConnector\Data\InvoiceData;
+use Hei\AccountingConnector\Data\InvoiceState;
 use Hei\AccountingConnector\Data\JournalData;
 use Hei\AccountingConnector\Data\LineCoding;
 use Hei\AccountingConnector\Data\Money;
@@ -50,6 +52,7 @@ use Hei\AccountingConnector\Exceptions\AccountingConnectorException;
 use Hei\AccountingConnector\Exceptions\AuthenticationException;
 use Hei\AccountingConnector\Exceptions\ConnectionRevokedException;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
+use Hei\AccountingConnector\Exceptions\InvoiceHasPaymentsException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\PreconditionFailedException;
 use Hei\AccountingConnector\Exceptions\RecodeMovedMoneyException;
@@ -74,7 +77,7 @@ use Hei\AccountingConnector\Support\RecodeInvariants;
  * HttpClient honours Retry-After and asks a RequestGate before every attempt; the
  * host still needs to keep its queue concurrency modest and to budget a long walk.
  */
-final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions
+final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions, VoidsInvoices
 {
     /** Contacts per GET Contacts page; Xero's own default and documented page size. */
     public const CONTACT_PAGE_SIZE = 100;
@@ -1271,6 +1274,199 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             date: null,
             total: Money::zero(),
             status: 'DELETED',
+        );
+    }
+
+    /**
+     * One GET by id. A 404 is the answer "gone", never an error: the host asking
+     * is asking because the bill may have been voided or deleted in Xero already.
+     */
+    public function findInvoice(Connection $connection, string $invoiceId): ?InvoiceState
+    {
+        if (trim($invoiceId) === '') {
+            throw new InvalidPayloadException('An invoice id is needed to read one.', $this->provider());
+        }
+
+        $connection = $this->fresh($connection);
+
+        $response = $this->get($connection, 'Invoices/'.rawurlencode($invoiceId));
+
+        if ($response->status === 404) {
+            return null;
+        }
+
+        if ($response->failed()) {
+            $this->raise($response, $connection, "reading the invoice {$invoiceId}");
+        }
+
+        $row = $response->get('Invoices.0');
+
+        return is_array($row) ? $this->invoiceState($row) : null;
+    }
+
+    /**
+     * Read, refuse or void, then read again.
+     *
+     * The read first is what makes this safe to call on a bill nobody has looked at
+     * since it was posted: it picks the status word Xero will accept (DELETED for a
+     * draft, VOIDED for an approved invoice), returns an invoice already gone
+     * without a write, and refuses before writing when money is applied, with the
+     * amounts in hand for the message. The read after is what the caller records:
+     * Xero's own word for the invoice now, not the one that was sent.
+     *
+     * A 404 on either side is "done": an invoice Xero no longer has is as voided as
+     * one it reports VOIDED, and the host gets one shape for both.
+     */
+    public function voidInvoice(Connection $connection, string $invoiceId, ?string $idempotencyKey = null): InvoiceState
+    {
+        if (trim($invoiceId) === '') {
+            throw new InvalidPayloadException('An invoice id is needed to void one.', $this->provider());
+        }
+
+        $connection = $this->fresh($connection);
+
+        $current = $this->findInvoice($connection, $invoiceId);
+
+        if ($current === null) {
+            return $this->voidedPlaceholder($invoiceId);
+        }
+
+        if ($current->isVoided()) {
+            return $current;
+        }
+
+        if ($current->hasPayments) {
+            throw new InvoiceHasPaymentsException(
+                sprintf(
+                    'The invoice %s cannot be voided: %s applied to it. Remove the payment, credit note, prepayment or overpayment in Xero first.',
+                    $invoiceId,
+                    $this->describeApplied($current),
+                ),
+                $current,
+                $this->provider(),
+            );
+        }
+
+        $response = $this->post(
+            $connection,
+            'Invoices/'.rawurlencode($invoiceId),
+            ['Invoices' => [['InvoiceID' => $invoiceId, 'Status' => $current->voidTarget()]]],
+            $idempotencyKey,
+        );
+
+        if ($response->status === 404) {
+            return $this->voidedPlaceholder($invoiceId);
+        }
+
+        if ($response->failed()) {
+            $message = $this->describeError($response);
+
+            if ($response->status < 500 && $this->refusedForAppliedMoney($message)) {
+                throw new InvoiceHasPaymentsException(
+                    sprintf('Xero refused to void the invoice %s: %s', $invoiceId, $message),
+                    $current,
+                    $this->provider(),
+                    $message,
+                );
+            }
+
+            $this->raise($response, $connection, "voiding the invoice {$invoiceId}");
+        }
+
+        $after = $this->findInvoice($connection, $invoiceId) ?? $this->voidedPlaceholder($invoiceId);
+
+        if (! $after->isVoided()) {
+            throw new ValidationException(
+                sprintf(
+                    'Xero accepted the void of the invoice %s but still reports it as %s.',
+                    $invoiceId,
+                    $after->status ?? 'unknown',
+                ),
+                $this->provider(),
+            );
+        }
+
+        return $after;
+    }
+
+    /**
+     * What an invoice Xero no longer returns looks like to a host: gone, by id.
+     */
+    private function voidedPlaceholder(string $invoiceId): InvoiceState
+    {
+        return new InvoiceState(id: $invoiceId, status: 'VOIDED');
+    }
+
+    /**
+     * Xero's refusals for applied money name the allocation, in one of a few
+     * wordings; matching the noun is safer than matching a sentence Xero may
+     * rephrase. "Not of valid status for modification" is a different refusal
+     * (PAID, VOIDED, DELETED) and is left to the caller's read.
+     */
+    private function refusedForAppliedMoney(string $message): bool
+    {
+        return preg_match('/payment|credit note|prepayment|overpayment|allocat/i', $message) === 1;
+    }
+
+    private function describeApplied(InvoiceState $state): string
+    {
+        $parts = [];
+
+        if ($state->amountPaid !== null && ! $state->amountPaid->isZero()) {
+            $parts[] = sprintf('%s %s paid', number_format($state->amountPaid->toDecimal(), 2, '.', ''), $state->currency ?? '');
+        }
+
+        if ($state->amountCredited !== null && ! $state->amountCredited->isZero()) {
+            $parts[] = sprintf('%s %s credited', number_format($state->amountCredited->toDecimal(), 2, '.', ''), $state->currency ?? '');
+        }
+
+        return $parts === [] ? 'money is' : implode(' and ', array_map('trim', $parts)).' is';
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     */
+    private function invoiceState(array $row): InvoiceState
+    {
+        $contact = is_array($row['Contact'] ?? null) ? $row['Contact'] : [];
+
+        $money = static fn (mixed $value): ?Money => is_numeric($value)
+            ? Money::fromDecimal((float) $value)
+            : null;
+
+        $string = static fn (mixed $value): ?string => is_scalar($value) && (string) $value !== ''
+            ? (string) $value
+            : null;
+
+        $applied = static fn (mixed $list): bool => is_array($list) && $list !== [];
+
+        $amountPaid = $money($row['AmountPaid'] ?? null);
+        $amountCredited = $money($row['AmountCredited'] ?? null);
+
+        $hasPayments = $applied($row['Payments'] ?? null)
+            || $applied($row['CreditNotes'] ?? null)
+            || $applied($row['Prepayments'] ?? null)
+            || $applied($row['Overpayments'] ?? null)
+            || ($amountPaid !== null && ! $amountPaid->isZero())
+            || ($amountCredited !== null && ! $amountCredited->isZero());
+
+        return new InvoiceState(
+            id: (string) ($row['InvoiceID'] ?? ''),
+            status: $string($row['Status'] ?? null),
+            type: $string($row['Type'] ?? null),
+            invoiceNumber: $string($row['InvoiceNumber'] ?? null),
+            reference: $string($row['Reference'] ?? null),
+            date: XeroDate::parse($string($row['Date'] ?? null)),
+            total: $money($row['Total'] ?? null),
+            amountDue: $money($row['AmountDue'] ?? null),
+            amountPaid: $amountPaid,
+            amountCredited: $amountCredited,
+            currency: $string($row['CurrencyCode'] ?? null),
+            contactId: $string($contact['ContactID'] ?? null),
+            contactName: $string($contact['Name'] ?? null),
+            hasPayments: $hasPayments,
+            hasAttachments: (bool) ($row['HasAttachments'] ?? false),
+            updatedDateUtc: XeroDate::parse($string($row['UpdatedDateUTC'] ?? null)),
         );
     }
 
