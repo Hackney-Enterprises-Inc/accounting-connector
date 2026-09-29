@@ -39,7 +39,7 @@ function connection(Provider $provider = Provider::Xero, array $settings = [], ?
  *
  * Doc-derived, not captured: shapes come from the Xero OpenAPI spec and the Intuit
  * API reference, cross-checked against what the connectors parse. Provenance and
- * the field-by-field notes live in .claude/docs/04-provider-response-shapes.md.
+ * the field-by-field notes live in .docs/04-provider-response-shapes.md.
  *
  * @return array<string, mixed>
  */

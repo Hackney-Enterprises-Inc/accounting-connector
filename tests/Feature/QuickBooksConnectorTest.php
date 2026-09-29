@@ -571,7 +571,7 @@ it('reads the company back for confirmation after connecting', function () {
         ->and($info?->legalName)->toBe('Sandbox Company_US_1 LLC')
         ->and($info?->countryCode)->toBe('US')
         // CompanyInfo carries no currency element, so this degrades to null rather
-        // than guessing. See .claude/docs/04-provider-response-shapes.md.
+        // than guessing. See .docs/04-provider-response-shapes.md.
         ->and($info?->currencyCode)->toBeNull();
 });
 
