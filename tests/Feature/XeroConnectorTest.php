@@ -20,6 +20,7 @@ use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\AuthenticationException;
 use Hei\AccountingConnector\Exceptions\ConnectionRevokedException;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
+use Hei\AccountingConnector\Exceptions\ServerException;
 use Hei\AccountingConnector\Exceptions\ValidationException;
 use Hei\AccountingConnector\Support\ArrayEntityMap;
 use Hei\AccountingConnector\Testing\FakeHttpClient;
@@ -629,6 +630,148 @@ it('reads the connected organisation back so a host can confirm the right compan
         ->and($info?->countryCode)->toBe('US')
         ->and($info?->currencyCode)->toBe('USD');
 });
+
+/**
+ * The organisation fixture with its lock date fields replaced. A null value
+ * removes the field, which is how Xero answers when no lock is set.
+ *
+ * @return array<string, mixed>
+ */
+function organisationWithLockDates(?string $period_lock_date, ?string $end_of_year_lock_date): array
+{
+    $response = providerResponse('xero/organisation');
+
+    foreach (['PeriodLockDate' => $period_lock_date, 'EndOfYearLockDate' => $end_of_year_lock_date] as $field => $value) {
+        if ($value === null) {
+            unset($response['Organisations'][0][$field]);
+        } else {
+            $response['Organisations'][0][$field] = $value;
+        }
+    }
+
+    return $response;
+}
+
+it('reads both lock dates from the organisation as calendar dates at UTC midnight', function () {
+    $fake = fakeHttp();
+    // Xero's own example values: 2018-12-31 and 2017-12-31 at 00:00 UTC.
+    $fake->queue(200, organisationWithLockDates('/Date(1546214400000+0000)/', '/Date(1514678400000+0000)/'));
+
+    $info = xero($fake)->tenantInfo(connection());
+
+    expect($info?->periodLockDate?->format('Y-m-d H:i:s e'))->toBe('2018-12-31 00:00:00 UTC')
+        ->and($info?->endOfYearLockDate?->format('Y-m-d H:i:s e'))->toBe('2017-12-31 00:00:00 UTC')
+        ->and($info?->name)->toBe('Demo Company (US)');
+});
+
+it('reads one lock date when only one is set', function (?string $period, ?string $end_of_year, ?string $expected_period, ?string $expected_end_of_year) {
+    $fake = fakeHttp();
+    $fake->queue(200, organisationWithLockDates($period, $end_of_year));
+
+    $info = xero($fake)->tenantInfo(connection());
+
+    expect($info?->periodLockDate?->format('Y-m-d'))->toBe($expected_period)
+        ->and($info?->endOfYearLockDate?->format('Y-m-d'))->toBe($expected_end_of_year);
+})->with([
+    'period only' => ['/Date(1546214400000+0000)/', null, '2018-12-31', null],
+    'end of year only' => [null, '/Date(1514678400000+0000)/', null, '2017-12-31'],
+]);
+
+it('reports no lock dates when the organisation has none', function () {
+    $fake = fakeHttp();
+    $fake->queue(200, providerResponse('xero/organisation'));
+
+    $info = xero($fake)->tenantInfo(connection());
+
+    expect($info?->periodLockDate)->toBeNull()
+        ->and($info?->endOfYearLockDate)->toBeNull();
+});
+
+it('accepts a lock date in either format Xero uses', function (string $value) {
+    $fake = fakeHttp();
+    $fake->queue(200, organisationWithLockDates($value, $value));
+
+    $info = xero($fake)->tenantInfo(connection());
+
+    expect($info?->periodLockDate?->format('Y-m-d H:i:s e'))->toBe('2019-06-30 00:00:00 UTC')
+        ->and($info?->endOfYearLockDate?->format('Y-m-d H:i:s e'))->toBe('2019-06-30 00:00:00 UTC');
+})->with([
+    'Microsoft JSON date' => ['/Date(1561852800000+0000)/'],
+    'Microsoft JSON date without offset' => ['/Date(1561852800000)/'],
+    'ISO date' => ['2019-06-30'],
+    'ISO date and time' => ['2019-06-30T00:00:00'],
+]);
+
+it('treats an explicit null lock date as no lock', function () {
+    $fake = fakeHttp();
+    $response = providerResponse('xero/organisation');
+    $response['Organisations'][0]['PeriodLockDate'] = null;
+    $response['Organisations'][0]['EndOfYearLockDate'] = null;
+    $fake->queue(200, $response);
+
+    $info = xero($fake)->tenantInfo(connection());
+
+    expect($info?->periodLockDate)->toBeNull()
+        ->and($info?->endOfYearLockDate)->toBeNull();
+});
+
+it('refuses a lock date it cannot read instead of reporting no lock', function (string $field, mixed $value) {
+    // Null means "no lock". Reading an unreadable lock as null would let a host
+    // post into a period that may be locked, so the read fails instead and the
+    // host treats the lock dates as unavailable.
+    $fake = fakeHttp();
+    $response = organisationWithLockDates('/Date(1546214400000+0000)/', '/Date(1514678400000+0000)/');
+    $response['Organisations'][0][$field] = $value;
+    $fake->queue(200, $response);
+
+    $read = fn () => xero($fake)->tenantInfo(connection());
+
+    expect($read)->toThrow(ServerException::class, "Xero returned an unreadable {$field}");
+})->with([
+    'period, empty string' => ['PeriodLockDate', ''],
+    'period, not a date' => ['PeriodLockDate', 'not a date'],
+    'period, impossible day' => ['PeriodLockDate', '2018-02-30'],
+    'period, relative words' => ['PeriodLockDate', 'next monday'],
+    'period, not a string' => ['PeriodLockDate', 20190630],
+    'end of year, malformed Microsoft date' => ['EndOfYearLockDate', '/Date(abc)/'],
+    'end of year, array' => ['EndOfYearLockDate', ['2019-06-30']],
+]);
+
+it('carries the provider and the raw value on an unreadable lock date', function () {
+    $fake = fakeHttp();
+    $fake->queue(200, organisationWithLockDates('garbage', null));
+
+    try {
+        xero($fake)->tenantInfo(connection());
+        $thrown = null;
+    } catch (ServerException $exception) {
+        $thrown = $exception;
+    }
+
+    expect($thrown)->toBeInstanceOf(ServerException::class)
+        ->and($thrown?->provider)->toBe(Provider::Xero)
+        ->and($thrown?->providerMessage)->toBe('garbage');
+});
+
+it('keeps the lock date on the right day whatever the host timezone', function (string $timezone) {
+    // A lock date is a calendar date. Read through the host's default timezone,
+    // midnight UTC on the 31st is still the 30th in Los Angeles, which would let
+    // a posting dated on the locked day through the host's own pre-check.
+    $previous = date_default_timezone_get();
+    date_default_timezone_set($timezone);
+
+    try {
+        $fake = fakeHttp();
+        $fake->queue(200, organisationWithLockDates('/Date(1546214400000+0000)/', '2017-12-31'));
+
+        $info = xero($fake)->tenantInfo(connection());
+
+        expect($info?->periodLockDate?->format('Y-m-d'))->toBe('2018-12-31')
+            ->and($info?->endOfYearLockDate?->format('Y-m-d'))->toBe('2017-12-31');
+    } finally {
+        date_default_timezone_set($previous);
+    }
+})->with(['America/Los_Angeles', 'Pacific/Auckland', 'UTC']);
 
 it('is the Xero provider', function () {
     expect(xero(fakeHttp())->provider())->toBe(Provider::Xero);

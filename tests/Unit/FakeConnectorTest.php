@@ -9,6 +9,7 @@ use Hei\AccountingConnector\Data\ExpenseData;
 use Hei\AccountingConnector\Data\LineItem;
 use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
+use Hei\AccountingConnector\Data\TenantInfo;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
@@ -110,6 +111,50 @@ it('refuses a raw payload built for another provider, like the real connector', 
 
     expect(fn () => (new FakeConnector(Provider::Xero))->createEntity(EntityType::Bill, $raw, connection()))
         ->toThrow(InvalidPayloadException::class, 'cannot be posted to Xero');
+});
+
+it('reports no lock dates by default', function () {
+    $info = (new FakeConnector)->tenantInfo(connection());
+
+    expect($info?->periodLockDate)->toBeNull()
+        ->and($info?->endOfYearLockDate)->toBeNull();
+});
+
+it('can seed lock dates on the default tenant, normalised to calendar dates at UTC midnight', function () {
+    $fake = (new FakeConnector)->withLockDates(
+        new DateTimeImmutable('2026-06-30 18:45:00', new DateTimeZone('America/Los_Angeles')),
+        new DateTime('2025-12-31'),
+    );
+
+    $info = $fake->tenantInfo(connection());
+
+    expect($info?->periodLockDate?->format('Y-m-d H:i:s e'))->toBe('2026-06-30 00:00:00 UTC')
+        ->and($info?->endOfYearLockDate?->format('Y-m-d H:i:s e'))->toBe('2025-12-31 00:00:00 UTC')
+        ->and($info?->name)->toBe('Fake Company')
+        ->and($info?->id)->toBe(connection()->tenantId);
+});
+
+it('seeds lock dates onto a tenant the test already set, keeping its other details', function () {
+    $fake = new FakeConnector;
+    $fake->tenant = new TenantInfo(id: 't-9', name: 'Seeded Ltd', countryCode: 'NZ', currencyCode: 'NZD');
+
+    $info = $fake->withLockDates(null, new DateTimeImmutable('2024-03-31'))->tenantInfo(connection());
+
+    expect($info?->id)->toBe('t-9')
+        ->and($info?->name)->toBe('Seeded Ltd')
+        ->and($info?->countryCode)->toBe('NZ')
+        ->and($info?->currencyCode)->toBe('NZD')
+        ->and($info?->periodLockDate)->toBeNull()
+        ->and($info?->endOfYearLockDate?->format('Y-m-d'))->toBe('2024-03-31');
+});
+
+it('clears seeded lock dates with nulls', function () {
+    $fake = (new FakeConnector)->withLockDates(new DateTimeImmutable('2026-06-30'), new DateTimeImmutable('2025-12-31'));
+
+    $info = $fake->withLockDates(null, null)->tenantInfo(connection());
+
+    expect($info?->periodLockDate)->toBeNull()
+        ->and($info?->endOfYearLockDate)->toBeNull();
 });
 
 it('can simulate an unidentifiable tenant', function () {

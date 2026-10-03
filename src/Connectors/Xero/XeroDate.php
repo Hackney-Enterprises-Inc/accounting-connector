@@ -6,6 +6,7 @@ namespace Hei\AccountingConnector\Connectors\Xero;
 
 use DateTimeImmutable;
 use DateTimeInterface;
+use DateTimeZone;
 
 /**
  * Xero's two date formats, both of which you will meet.
@@ -58,5 +59,37 @@ final class XeroDate
         } catch (\Exception) {
             return null;
         }
+    }
+
+    /**
+     * Parse a calendar date, such as a lock date, as midnight UTC on that day.
+     *
+     * Stricter than parse(): only the /Date(...)/ form and an ISO date (optionally
+     * with a time, which is ignored) are accepted, and the day must exist. The day
+     * is taken in UTC, which is how Xero encodes a date-only field, rather than in
+     * the host's default timezone, where midnight UTC can already be the day before.
+     * Returns null for anything else; the caller decides whether that is an error.
+     */
+    public static function parseDate(?string $value): ?DateTimeImmutable
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        $utc = new DateTimeZone('UTC');
+
+        if (preg_match('#^/Date\((-?\d+)([+-]\d{4})?\)/$#', $value, $matches) === 1) {
+            $day = (new DateTimeImmutable('@'.intdiv((int) $matches[1], 1000)))->setTimezone($utc)->format('Y-m-d');
+        } elseif (preg_match('#^(\d{4}-\d{2}-\d{2})(T\d{2}:\d{2}:\d{2}(\.\d+)?)?$#', $value, $matches) === 1) {
+            $day = $matches[1];
+        } else {
+            return null;
+        }
+
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $day, $utc);
+
+        // createFromFormat rolls 2018-02-30 over to March; a day that does not
+        // exist is not a date Xero meant.
+        return $date !== false && $date->format('Y-m-d') === $day ? $date : null;
     }
 }

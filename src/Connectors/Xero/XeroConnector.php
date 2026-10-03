@@ -56,6 +56,7 @@ use Hei\AccountingConnector\Exceptions\InvoiceHasPaymentsException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\PreconditionFailedException;
 use Hei\AccountingConnector\Exceptions\RecodeMovedMoneyException;
+use Hei\AccountingConnector\Exceptions\ServerException;
 use Hei\AccountingConnector\Exceptions\UnsupportedEntityTypeException;
 use Hei\AccountingConnector\Exceptions\ValidationException;
 use Hei\AccountingConnector\Http\HttpResponse;
@@ -293,7 +294,41 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             legalName: isset($organisation['LegalName']) ? (string) $organisation['LegalName'] : null,
             countryCode: isset($organisation['CountryCode']) ? (string) $organisation['CountryCode'] : null,
             currencyCode: isset($organisation['BaseCurrency']) ? (string) $organisation['BaseCurrency'] : null,
+            periodLockDate: $this->lockDate($organisation, 'PeriodLockDate'),
+            endOfYearLockDate: $this->lockDate($organisation, 'EndOfYearLockDate'),
         );
+    }
+
+    /**
+     * One of the Organisation's lock dates, or null when Xero reports none.
+     *
+     * Xero leaves the field out when no lock is set. A value that is present but
+     * does not read as a date throws rather than returning null, because null
+     * means "no lock" and a host would then post into a period that may be locked.
+     *
+     * @param  array<mixed>  $organisation
+     *
+     * @throws ServerException when the field is present but unreadable
+     */
+    private function lockDate(array $organisation, string $field): ?DateTimeImmutable
+    {
+        $value = $organisation[$field] ?? null;
+
+        if ($value === null) {
+            return null;
+        }
+
+        $date = is_string($value) ? XeroDate::parseDate($value) : null;
+
+        if ($date === null) {
+            throw new ServerException(
+                "Xero returned an unreadable {$field} for the organisation, so its lock dates are unknown.",
+                Provider::Xero,
+                is_scalar($value) ? (string) $value : (json_encode($value) ?: null),
+            );
+        }
+
+        return $date;
     }
 
     public function chartOfAccounts(Connection $connection, bool $forceRefresh = false): array

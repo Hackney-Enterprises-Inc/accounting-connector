@@ -572,7 +572,11 @@ it('reads the company back for confirmation after connecting', function () {
         ->and($info?->countryCode)->toBe('US')
         // CompanyInfo carries no currency element, so this degrades to null rather
         // than guessing. See .docs/04-provider-response-shapes.md.
-        ->and($info?->currencyCode)->toBeNull();
+        ->and($info?->currencyCode)->toBeNull()
+        // CompanyInfo has no lock date. QuickBooks keeps its closing date in
+        // Preferences, which this read does not fetch, so both stay null.
+        ->and($info?->periodLockDate)->toBeNull()
+        ->and($info?->endOfYearLockDate)->toBeNull();
 });
 
 it('reads accounts back addressed by id, never by account number', function () {
