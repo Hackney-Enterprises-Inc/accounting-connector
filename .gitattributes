@@ -3,6 +3,7 @@
 # CHANGELOG.md. Everything below is development tooling or private working notes;
 # release.yml refuses a tag whose archive carries any of it.
 /.claude              export-ignore
+/.docs                export-ignore
 /.github              export-ignore
 /build                export-ignore
 /docs                 export-ignore
@@ -10,6 +11,7 @@
 /.env.contract.example export-ignore
 /.gitattributes       export-ignore
 /.gitignore           export-ignore
+/AGENTS.md            export-ignore
 /CLAUDE.md            export-ignore
 /phpstan.neon         export-ignore
 /phpunit.contract.xml export-ignore

@@ -13,3 +13,5 @@ composer.lock
 /tests/Contract/*.token.json
 /tests/Contract/.xero-token.json
 .phpunit.contract.cache
+# Private working notes: live captures, realm ids, port notes. Never commit.
+/.docs/

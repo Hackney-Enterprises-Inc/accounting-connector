@@ -109,7 +109,7 @@ jobs:
           git archive --format=tar HEAD > /tmp/release-check.tar
           echo "--- archive contents ---"
           tar -tf /tmp/release-check.tar | sed 's/^/  /'
-          if tar -tf /tmp/release-check.tar | grep -Ei '(^|/)(tests|\.github|docs|\.claude|build)/|(^|/)CLAUDE\.md$'; then
+          if tar -tf /tmp/release-check.tar | grep -Ei '(^|/)(tests|\.github|docs|\.docs|\.claude|build)/|(^|/)(CLAUDE|AGENTS)\.md$'; then
             echo "::error::Development files leaked into the dist archive. Check the export-ignore rules in .gitattributes."
             exit 1
           fi
