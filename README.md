@@ -120,6 +120,16 @@ app(ConnectionRepository::class)->save($connection);
 $info = $connector->tenantInfo($connection);
 ```
 
+`TenantInfo` carries `id`, `name`, `legalName`, `countryCode`, `currencyCode` and, since 0.5.0,
+the company's two lock dates: `periodLockDate` and `endOfYearLockDate`, each a
+`DateTimeImmutable` at midnight UTC on the locked day, or `null` when no such lock is set. Xero
+refuses postings dated on or before a lock date: `periodLockDate` ("for all users except
+advisers") binds everyone but advisers, `endOfYearLockDate` ("for all users") binds everyone.
+Compare them as calendar dates (`format('Y-m-d')`), not as instants in a local timezone. A lock
+date Xero sends but the connector cannot read makes `tenantInfo()` throw a `ServerException`
+rather than report no lock, so a host checking dates before posting fails closed. QuickBooks
+reports neither; its closing date lives in Preferences, which this read does not fetch.
+
 **Disconnecting** is three steps, in this order: `$connector->revoke($connection)` (best effort —
 it returns `false` rather than throwing, because the local disconnect must happen either way),
 then `ConnectionRepository::forget()` (or `markRevoked()` to keep the row for a "reconnect"
@@ -514,6 +524,11 @@ Seed it with `withBankTransactions(...)` and `withContacts(...)` to test matchin
 contact syncing without HTTP calls; `contacts()` honours `$modifiedSince` against each seeded
 contact's `updatedAt` and records every call in `$contactListings`.
 
+`tenantInfo()` reports a default "Fake Company", or the `TenantInfo` you assign to `$tenant`;
+`withoutTenantInfo()` makes it return null. `withLockDates($periodLockDate, $endOfYearLockDate)`
+seeds the two lock dates onto whichever tenant it reports, reduced to calendar dates at midnight
+UTC like the Xero connector's, and `withLockDates(null, null)` clears them.
+
 ## Provider differences that are not portable
 
 Worth knowing before you assume symmetry.
@@ -532,6 +547,7 @@ Worth knowing before you assume symmetry.
 | Attachment | 10 MB, raw octets | 20 MB here, multipart with two literally-named parts |
 | Response dates | `/Date(...)/` | plain ISO |
 | `tenantInfo()` currency | populated | **null** — CompanyInfo carries no currency element |
+| `tenantInfo()` lock dates | `PeriodLockDate`, `EndOfYearLockDate` from `/Organisation` | **null** — the closing date is in Preferences, not read |
 
 Read `Account::lineReference()` rather than assembling an account reference yourself; it returns the
 right form for whichever provider the connection points at.

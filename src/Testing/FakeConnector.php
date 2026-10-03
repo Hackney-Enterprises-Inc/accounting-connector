@@ -7,6 +7,7 @@ namespace Hei\AccountingConnector\Testing;
 use Closure;
 use DateTimeImmutable;
 use DateTimeInterface;
+use DateTimeZone;
 use Hei\AccountingConnector\Contracts\AccountingConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
@@ -204,6 +205,13 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     /** Makes tenantInfo() report an unknown tenant. */
     private bool $tenantUnknown = false;
 
+    /**
+     * Lock dates laid over whichever tenant tenantInfo() reports; null until seeded.
+     *
+     * @var array{0: DateTimeImmutable|null, 1: DateTimeImmutable|null}|null
+     */
+    private ?array $lockDates = null;
+
     /** Thrown by every lookup until cleared. */
     private ?Throwable $lookupFailure = null;
 
@@ -310,6 +318,23 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     }
 
     /**
+     * Seed the lock dates tenantInfo() reports, on the tenant set in $tenant or on
+     * the default fake company. Each is reduced to its calendar date at midnight
+     * UTC, the way the Xero connector reports them; nulls clear them.
+     */
+    public function withLockDates(?DateTimeInterface $periodLockDate, ?DateTimeInterface $endOfYearLockDate = null): self
+    {
+        $this->lockDates = [self::calendarDate($periodLockDate), self::calendarDate($endOfYearLockDate)];
+
+        return $this;
+    }
+
+    private static function calendarDate(?DateTimeInterface $date): ?DateTimeImmutable
+    {
+        return $date === null ? null : new DateTimeImmutable($date->format('Y-m-d'), new DateTimeZone('UTC'));
+    }
+
+    /**
      * Make the next attach report a specific outcome.
      */
     public function nextAttachment(AttachmentResult $result): self
@@ -359,10 +384,24 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
             return null;
         }
 
-        return $this->tenant ?? new TenantInfo(
+        $tenant = $this->tenant ?? new TenantInfo(
             id: $connection->tenantId,
             name: 'Fake Company',
             currencyCode: 'USD',
+        );
+
+        if ($this->lockDates === null) {
+            return $tenant;
+        }
+
+        return new TenantInfo(
+            id: $tenant->id,
+            name: $tenant->name,
+            legalName: $tenant->legalName,
+            countryCode: $tenant->countryCode,
+            currencyCode: $tenant->currencyCode,
+            periodLockDate: $this->lockDates[0],
+            endOfYearLockDate: $this->lockDates[1],
         );
     }
 

@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-03
+
+### Added
+
+- `TenantInfo::$periodLockDate` and `TenantInfo::$endOfYearLockDate`, two nullable
+  `DateTimeImmutable` values appended to the constructor with null defaults, so existing
+  positional and named callers are unchanged. Each is the locked calendar day at midnight
+  UTC; null means no such lock. The Xero connector reads them from the `PeriodLockDate`
+  ("for all users except advisers") and `EndOfYearLockDate` ("for all users") fields of the
+  `GET Organisation` call `tenantInfo()` already makes, so no extra request. Both the
+  `/Date(ms+0000)/` form and an ISO date are accepted, and the day is taken in UTC rather
+  than the host's default timezone, where midnight UTC can be the previous day. QuickBooks
+  reports both as null: its closing date is in Preferences, which is not read.
+- `toArray()` carries them as `period_lock_date` and `end_of_year_lock_date` (`Y-m-d` or null).
+- `FakeConnector::withLockDates(?DateTimeInterface $periodLockDate, ?DateTimeInterface $endOfYearLockDate = null)`
+  seeds both onto the tenant `tenantInfo()` reports (the one set in `$tenant`, or the default
+  fake company), reduced to calendar dates at midnight UTC; `withLockDates(null, null)` clears them.
+- `XeroDate::parseDate()`: a strict calendar-date parser (the `/Date(...)/` form or an ISO date,
+  the day must exist, read in UTC) returning null for anything else.
+
+### Changed
+
+- `tenantInfo()` on Xero now throws `ServerException` when the Organisation carries a lock
+  date that is present but unreadable (an empty string, a non-string, an impossible day, or
+  any other format). Absent or JSON null still reads as no lock. Returning null would mean
+  "no lock" and let a host post into a period that may be locked, so the read fails closed;
+  the exception's `providerMessage` holds the raw value. `ServerException`'s description is
+  widened to cover such unreadable provider values.
+
 ## [0.4.0] - 2026-09-24
 
 ### Added

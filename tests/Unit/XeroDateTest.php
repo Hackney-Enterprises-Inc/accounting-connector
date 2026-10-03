@@ -30,3 +30,29 @@ it('returns null rather than throwing on something unparseable', function () {
         ->and(XeroDate::parse(''))->toBeNull()
         ->and(XeroDate::parse(null))->toBeNull();
 });
+
+it('reads a calendar date as midnight UTC, whatever the default timezone', function (string $value) {
+    $previous = date_default_timezone_get();
+    date_default_timezone_set('America/Los_Angeles');
+
+    try {
+        expect(XeroDate::parseDate($value)?->format('Y-m-d H:i:s e'))->toBe('2018-12-31 00:00:00 UTC');
+    } finally {
+        date_default_timezone_set($previous);
+    }
+})->with([
+    'Microsoft JSON date' => ['/Date(1546214400000+0000)/'],
+    'ISO date' => ['2018-12-31'],
+    'ISO date and time' => ['2018-12-31T00:00:00'],
+]);
+
+it('returns null for a calendar date it cannot read', function (?string $value) {
+    expect(XeroDate::parseDate($value))->toBeNull();
+})->with([
+    'null' => [null],
+    'empty' => [''],
+    'words' => ['not a date'],
+    'impossible day' => ['2018-02-30'],
+    'relative words strtotime would accept' => ['next monday'],
+    'malformed Microsoft date' => ['/Date(abc)/'],
+]);
