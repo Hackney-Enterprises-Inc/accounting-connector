@@ -79,7 +79,7 @@ jobs:
       # Skip constraint warnings while keeping other validation strict.
       - run: composer validate --strict --no-check-all
 
-      - uses: ramsey/composer-install@v3
+      - uses: ramsey/composer-install@v4
 
       # The three gates, the same ones tests.yml runs on every push.
       - run: vendor/bin/pint --test
