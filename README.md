@@ -134,6 +134,11 @@ reports neither; its closing date lives in Preferences, which this read does not
 it returns `false` rather than throwing, because the local disconnect must happen either way),
 then `ConnectionRepository::forget()` (or `markRevoked()` to keep the row for a "reconnect"
 banner), then drop cached lookups (`DatabaseLookupStore::flush()`).
+Keep that order. Asking the provider can refresh an expired token first, and `persist()` writes
+the refreshed tokens only into a stored, active row: after `forget()` or `markRevoked()` they would
+go nowhere. Where the connector implements `DisconnectsTenants` (Xero), use `disconnectTenant()` for the first
+step instead: it says whether the app is gone at the provider or the person has to remove it there
+(see [Disconnecting at the provider](#disconnecting-at-the-provider)).
 
 **Reconnecting** to a possibly different organisation: call `refreshLookups()` after saving the
 new connection. Stored lookup lists are keyed by your tenant, deliberately, so they survive a
@@ -177,6 +182,16 @@ so in practice this is rare — but the fix is on your side of the seam:
 Treat the first `ConnectionRevokedException` on a healthy connection with suspicion if you run
 concurrent workers without a lock.
 
+`DatabaseConnectionRepository::persist()` writes refreshed tokens only into the row they belong
+to: same owner and provider, same tenant, and status `active`. A refresh that started before the
+owner reconnected to a different tenant, or that lands after the row was revoked or disconnected,
+persists nothing and logs a warning saying so. Before 0.7.0 it matched on owner and provider only,
+so that refresh wrote the old tenant's tokens under the new tenant's id. The refreshed
+`Connection` the connector hands back still names the old tenant, so a call that carries on with
+it goes to the old tenant, never the new one; whether that call should still happen after a
+reconnect is your decision. A `ConnectionRevoked` listener that marks a row revoked should check
+the tenant the same way (`markRevoked()` is keyed on owner and provider).
+
 ### Money is integer cents
 
 `Money::cents(12500)`. Both providers want decimals on the wire; the conversion happens once, at the
@@ -200,6 +215,9 @@ Pass `null` only when a second entity is genuinely wanted, such as a user-initia
 By the time an attachment uploads, the transaction already exists in the customer's ledger.
 Throwing would fail the job, and the retry would post a second transaction. So `attach()` returns
 an `AttachmentResult` and never throws. It catches `Throwable`, not just its own exceptions.
+That covers your own code too: an `AttachmentUploaded` listener that throws is logged at error
+(when the logger works) and the result is still returned, and a logger that throws is ignored.
+`revoke()` and `disconnectTenant()` follow the same rule.
 
 Xero caps attachments at 10 MB and a rendered email PDF regularly exceeds it. Offer fallbacks:
 
@@ -276,15 +294,51 @@ It also caches contact resolution, which removes a round trip per contact per po
 the refresh token lapsed. Stop dispatching jobs for that connection and tell somebody. Retrying
 achieves nothing. (But see the concurrency note above before treating the first one as gospel.)
 
+### Disconnecting at the provider
+
+A Disconnect button should remove the app at the provider too, or it stays listed among the
+customer's connected apps and its webhooks keep arriving. `revoke()` on the core contract does
+that best effort and answers a bool. `DisconnectsTenants::disconnectTenant()` (Xero; ask with
+`instanceof`) does the same and says what it found:
+
+```php
+$outcome = $connector instanceof DisconnectsTenants
+    ? $connector->disconnectTenant($connection)
+    : ($connector->revoke($connection) ? DisconnectOutcome::Removed : DisconnectOutcome::Unconfirmed);
+
+// Clear your own tokens whatever the outcome.
+if (! $outcome->isSettled()) {
+    // Tell the person to remove the app at the provider (Xero: Settings > Connected apps).
+}
+```
+
+- `Removed`: the tenant's connection was deleted now.
+- `NotConnected`: the connections listing was read and has no entry for the tenant, or the
+  delete answered 404. Already gone (removed at Xero first, or a second click): a clean disconnect.
+  Only a JSON list whose every entry has a non-empty string `id` and `tenantId` can say so: an
+  object, a `null` or partial entry anywhere in the list is `Unconfirmed`, never `NotConnected`.
+- `Unconfirmed`: anything else. A refresh Xero rejected, a listing that failed or could not be
+  read, a refused delete, a transport error. It never throws.
+
+Only this tenant's entry in `GET /connections` is deleted (`DELETE /connections/{id}`): one Xero
+user's token can list several organisations, and the others stay connected. The refresh token is
+not revoked at Xero's identity revocation endpoint, because that removes every tenant connected
+through it. `revoke()` now delegates here and is true only for `Removed`, as before.
+
+Not yet verified against a live Xero organisation: that a deleted connection stops webhooks and
+disappears from Connected apps at once, and that a second delete answers 404. The outcome mapping
+is right under either answer; a contract case against the demo company would record them.
+
 ## Existing bank transactions (Xero)
 
-Xero implements six optional contracts beyond `AccountingConnector`. Check them with
+Xero implements seven optional contracts beyond `AccountingConnector`. Check them with
 `instanceof` before use; the QuickBooks connector does not implement them.
 
 | Contract | Methods | Purpose |
 |---|---|---|
 | `ReadsBankTransactions` | `listBankTransactions()`, `findBankTransaction()` | Page through existing transactions or re-read one before matching |
 | `CodesBankTransactions` | `recodeBankTransaction()`, `updateBankTransactionCoding()`, `deleteBankTransaction()` | Change coding or delete a transaction |
+| `DisconnectsTenants` | `disconnectTenant()` | Remove the tenant's connection at the provider on a Disconnect, and say whether it was removed, already gone or unconfirmed |
 | `FindsContacts` | `findContactByName()` | Find an existing contact without creating one |
 | `FindsManualJournals` | `findManualJournalsByMarker()` | Find the manual journals whose narration carries a marker the host wrote, to settle a create whose outcome was lost |
 | `ListsContacts` | `contacts()` | Walk every contact, archived and merged ones included, optionally only those changed since an instant |
@@ -377,7 +431,7 @@ The package emits PSR-14 events; storing those events is the host's responsibili
 | `EntityCreated` | provider confirmed the id, before any attachment | `externalId` — record it immediately |
 | `EntityCreateFailed` | a create was refused or returned no id | `retryable` — validation needs a human, a rate limit just needs the job re-run |
 | `AttachmentUploaded` | an attachment attempt finished, either way | `result->uploaded` |
-| `TokensRefreshed` | tokens renewed and already persisted | observability only — do not persist from here |
+| `TokensRefreshed` | tokens renewed, after the store was asked to persist them | observability only: do not persist from here, and do not read it as proof the tokens were stored (the store skips a stale row: a tenant since reconnected away from, or a connection no longer active). A listener that throws is logged and the call carries on with the new tokens |
 | `ConnectionRevoked` | the grant is dead, a human must reconnect | `reason` |
 
 One deliberate gap: a create that dies in the pre-create token refresh raises (and, on a dead

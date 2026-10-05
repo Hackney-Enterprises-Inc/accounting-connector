@@ -100,7 +100,8 @@ interface AccountingConnector
      *
      * Best effort, and returns false rather than throwing on failure: the local
      * disconnect has to happen either way, or the customer is stuck holding
-     * credentials they cannot drop.
+     * credentials they cannot drop. A logger that throws while the failure is
+     * logged is ignored.
      */
     public function revoke(Connection $connection): bool;
 
@@ -169,7 +170,9 @@ interface AccountingConnector
      *
      * Never throws. The entity already exists by the time this runs, so a failure
      * here must not be able to fail a job that would then retry and post twice.
-     * Inspect the returned AttachmentResult.
+     * Inspect the returned AttachmentResult. That includes the host's own code: an
+     * AttachmentUploaded listener that throws is logged at error (when the logger
+     * works) and the result is still returned, and a logger that throws is ignored.
      *
      * Pass an AttachmentSet rather than an Attachment to offer fallbacks: Xero caps
      * attachments at 10 MB and a rendered email PDF often exceeds it, so offering

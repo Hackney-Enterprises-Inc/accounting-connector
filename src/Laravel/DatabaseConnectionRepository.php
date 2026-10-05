@@ -123,6 +123,15 @@ final class DatabaseConnectionRepository implements ConnectionRepository, Connec
      *
      * Deliberately narrower than save(): it touches only the token columns, so a
      * refresh racing a settings update cannot roll the settings back.
+     *
+     * Only into the row the refresh belongs to: the same owner and provider, the same
+     * tenant, and still active. The row is one per owner per provider and is reused
+     * when the owner reconnects, so a refresh that began before a reconnect to another
+     * tenant used to write the old tenant's tokens under the new tenant's id. A refresh
+     * that lands after a revocation or a host's own disconnect used to put live tokens
+     * back on a row that was emptied on purpose. Both now persist nothing and are
+     * logged as a warning naming why; they are expected races, not the missing-row
+     * error below.
      */
     public function persist(Connection $connection): void
     {
@@ -137,9 +146,16 @@ final class DatabaseConnectionRepository implements ConnectionRepository, Connec
             return;
         }
 
-        $updated = $this->query()
-            ->where('owner_id', $owner)
-            ->where('provider', $connection->provider->value)
+        $updated = $this->rowFor($owner, $connection->provider)
+            ->where(function (Builder $query) use ($connection): void {
+                $query->where('tenant_id', $connection->tenantId);
+
+                // save() stores an empty tenant id as ''; a host-written row may hold NULL.
+                if ($connection->tenantId === '') {
+                    $query->orWhereNull('tenant_id');
+                }
+            })
+            ->where('status', 'active')
             ->update([
                 'access_token' => $this->encrypter->encrypt($connection->accessToken, false),
                 'refresh_token' => $connection->refreshToken === null
@@ -155,6 +171,30 @@ final class DatabaseConnectionRepository implements ConnectionRepository, Connec
         // days later with no obvious cause, so it is loud instead. (A real refresh
         // always changes the access token, so an unchanged-values zero cannot occur.)
         if ($updated === 0) {
+            $stored = $this->rowFor($owner, $connection->provider)->first(['tenant_id', 'status']);
+
+            if ($stored !== null) {
+                try {
+                    $this->logger->warning(
+                        'Refreshed accounting tokens were NOT persisted: the stored connection is no longer this tenant '
+                        .'or is no longer active (reconnected, revoked or disconnected while the refresh was in flight). '
+                        .'The stored connection was left as it is.',
+                        [
+                            'provider' => $connection->provider->value,
+                            'connection' => $owner,
+                            'refreshed_tenant_id' => $connection->tenantId,
+                            'stored_tenant_id' => $stored->tenant_id,
+                            'stored_status' => $stored->status,
+                        ],
+                    );
+                } catch (\Throwable) {
+                    // An expected race, skipped on purpose: a logger that cannot write
+                    // must not turn the skip into a failed refresh.
+                }
+
+                return;
+            }
+
             $this->logger->error(
                 'Refreshed accounting tokens matched no stored connection row and were NOT persisted. '
                 .'Save the connection before refreshing it, or this connection will die at the next refresh.',
@@ -253,10 +293,14 @@ final class DatabaseConnectionRepository implements ConnectionRepository, Connec
 
             return is_string($plain) ? $plain : null;
         } catch (DecryptException $e) {
-            $this->logger->error(
-                'A stored accounting token could not be decrypted. The application key may have changed; this connection needs reconnecting.',
-                ['error' => $e->getMessage()],
-            );
+            try {
+                $this->logger->error(
+                    'A stored accounting token could not be decrypted. The application key may have changed; this connection needs reconnecting.',
+                    ['error' => $e->getMessage()],
+                );
+            } catch (\Throwable) {
+                // A failing log destination must not turn "reconnect" into a fatal error.
+            }
 
             return null;
         }
@@ -282,6 +326,13 @@ final class DatabaseConnectionRepository implements ConnectionRepository, Connec
     private function now(): string
     {
         return date('Y-m-d H:i:s');
+    }
+
+    private function rowFor(string $owner, Provider $provider): Builder
+    {
+        return $this->query()
+            ->where('owner_id', $owner)
+            ->where('provider', $provider->value);
     }
 
     private function query(): Builder

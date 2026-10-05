@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
+use Hei\AccountingConnector\Connectors\Xero\XeroConnector;
 use Hei\AccountingConnector\Contracts\ConnectionRepository;
 use Hei\AccountingConnector\Contracts\ConnectionStore;
 use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Data\TokenSet;
+use Hei\AccountingConnector\Enums\DisconnectOutcome;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\AccountingConnectorException;
 use Hei\AccountingConnector\Laravel\DatabaseConnectionRepository;
@@ -239,4 +241,221 @@ it('encrypts byte-compatibly with Eloquent own encrypted cast', function () {
     $ciphertext = DB::table('accounting_connections')->value('access_token');
 
     expect(Crypt::decrypt($ciphertext, false))->toBe('access-secret');
+});
+
+/**
+ * A logger that keeps what it was given, for asserting on level and wording.
+ */
+function keepingLogger(): AbstractLogger
+{
+    return new class extends AbstractLogger
+    {
+        /** @var list<array{level: mixed, message: string, context: array<string, mixed>}> */
+        public array $records = [];
+
+        public function log($level, Stringable|string $message, array $context = []): void
+        {
+            $this->records[] = ['level' => $level, 'message' => (string) $message, 'context' => $context];
+        }
+    };
+}
+
+function tenantConnection(string $tenant, string $access, string $refresh, string $owner = 'org-reconnect'): Connection
+{
+    return new Connection(
+        provider: Provider::Xero,
+        tenantId: $tenant,
+        accessToken: $access,
+        refreshToken: $refresh,
+        expiresAt: (new DateTimeImmutable)->modify('+30 minutes'),
+        reference: $owner,
+    );
+}
+
+it('persists nothing from a refresh for a tenant the owner has since reconnected away from', function () {
+    // Save tenant A, reconnect the owner to tenant B, then A's refresh that was
+    // already in flight lands. Matching on the owner alone wrote A's tokens under
+    // B's tenant id: B's working credentials were overwritten.
+    $logger = keepingLogger();
+    $repo = new DatabaseConnectionRepository(resolver: app('db'), encrypter: app('encrypter'), logger: $logger);
+
+    $repo->save(tenantConnection('tenant-A', 'access-A', 'refresh-A'));
+    $inFlight = $repo->find('org-reconnect', Provider::Xero);
+    $repo->save(tenantConnection('tenant-B', 'access-B', 'refresh-B'));
+
+    $repo->persist($inFlight->withTokens(new TokenSet('refreshed-access-A', 'refreshed-refresh-A', (new DateTimeImmutable)->modify('+30 minutes'))));
+
+    $stored = $repo->find('org-reconnect', Provider::Xero);
+    expect($stored->tenantId)->toBe('tenant-B')
+        ->and($stored->accessToken)->toBe('access-B')
+        ->and($stored->refreshToken)->toBe('refresh-B')
+        ->and($logger->records)->toHaveCount(1)
+        ->and($logger->records[0]['level'])->toBe('warning')
+        ->and($logger->records[0]['message'])->toContain('no longer')
+        ->and($logger->records[0]['message'])->not->toContain('will die')
+        ->and(json_encode($logger->records))->not->toContain('refreshed-access-A')
+        ->and(json_encode($logger->records))->not->toContain('refreshed-refresh-A');
+});
+
+it('persists a refresh for the tenant the owner is still connected to (control)', function () {
+    $logger = keepingLogger();
+    $repo = new DatabaseConnectionRepository(resolver: app('db'), encrypter: app('encrypter'), logger: $logger);
+
+    $repo->save(tenantConnection('tenant-B', 'access-B', 'refresh-B'));
+    $current = $repo->find('org-reconnect', Provider::Xero);
+
+    $repo->persist($current->withTokens(new TokenSet('refreshed-access-B', 'refreshed-refresh-B', (new DateTimeImmutable)->modify('+30 minutes'))));
+
+    expect($repo->find('org-reconnect', Provider::Xero)->accessToken)->toBe('refreshed-access-B')
+        ->and($logger->records)->toBe([]);
+});
+
+it('persists nothing into a row that is no longer active', function (string $status) {
+    // A refresh racing a revocation, or a host's own disconnect, must not put live
+    // tokens back on a row that was deliberately emptied.
+    $logger = keepingLogger();
+    $repo = new DatabaseConnectionRepository(resolver: app('db'), encrypter: app('encrypter'), logger: $logger);
+
+    $repo->save(tenantConnection('tenant-A', 'access-A', 'refresh-A'));
+    $inFlight = $repo->find('org-reconnect', Provider::Xero);
+    DB::table('accounting_connections')->where('owner_id', 'org-reconnect')->update(['status' => $status, 'access_token' => null, 'refresh_token' => null]);
+
+    $repo->persist($inFlight->withTokens(new TokenSet('refreshed-access-A', 'refreshed-refresh-A', (new DateTimeImmutable)->modify('+30 minutes'))));
+
+    $row = DB::table('accounting_connections')->where('owner_id', 'org-reconnect')->first();
+    expect($row->access_token)->toBeNull()
+        ->and($row->refresh_token)->toBeNull()
+        ->and($row->status)->toBe($status)
+        ->and($logger->records)->toHaveCount(1)
+        ->and($logger->records[0]['level'])->toBe('warning');
+})->with(['revoked', 'disconnected']);
+
+it('still reads an undecryptable token as reconnect when the logger throws', function () {
+    $repo = new DatabaseConnectionRepository(
+        resolver: app('db'),
+        encrypter: app('encrypter'),
+        logger: new class extends AbstractLogger
+        {
+            public function log($level, Stringable|string $message, array $context = []): void
+            {
+                throw new RuntimeException('Log destination unavailable');
+            }
+        },
+    );
+
+    $repo->save(xeroFor('org-1'));
+    DB::table('accounting_connections')->update(['access_token' => 'not-valid-ciphertext']);
+
+    expect($repo->find('org-1', Provider::Xero))->toBeNull();
+});
+
+/*
+ * persist() and an empty tenant id. save() stores a Connection's tenantId as given, so
+ * '' is stored as ''; a host that writes its own rows may leave tenant_id NULL. A
+ * refresh carrying '' matches either; one naming a tenant never matches NULL.
+ */
+function emptyTenantCase(?string $stored_tenant, string $refreshed_tenant): array
+{
+    $logger = keepingLogger();
+    $repo = new DatabaseConnectionRepository(resolver: app('db'), encrypter: app('encrypter'), logger: $logger);
+
+    $repo->save(tenantConnection($stored_tenant ?? '', 'access-old', 'refresh-old', 'org-empty'));
+    DB::table('accounting_connections')->where('owner_id', 'org-empty')->update(['tenant_id' => $stored_tenant]);
+
+    $repo->persist(tenantConnection($refreshed_tenant, 'access-new', 'refresh-new', 'org-empty'));
+
+    $row = DB::table('accounting_connections')->where('owner_id', 'org-empty')->first();
+
+    return [Crypt::decryptString($row->access_token), $row->tenant_id, $logger->records];
+}
+
+it('persists a refresh with an empty tenant into a row stored with an empty tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase('', '');
+
+    expect($access)->toBe('access-new')->and($tenant)->toBe('')->and($logs)->toBe([]);
+});
+
+it('persists a refresh with an empty tenant into a host-written row with a NULL tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase(null, '');
+
+    expect($access)->toBe('access-new')->and($tenant)->toBeNull()->and($logs)->toBe([]);
+});
+
+it('persists nothing from a refresh naming a tenant into a row with a NULL tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase(null, 'tenant-A');
+
+    expect($access)->toBe('access-old')
+        ->and($tenant)->toBeNull()
+        ->and($logs)->toHaveCount(1)
+        ->and($logs[0]['level'])->toBe('warning')
+        ->and($logs[0]['message'])->not->toContain('will die');
+});
+
+it('persists nothing from a refresh with an empty tenant into a row naming a tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase('tenant-A', '');
+
+    expect($access)->toBe('access-old')
+        ->and($tenant)->toBe('tenant-A')
+        ->and($logs)->toHaveCount(1)
+        ->and($logs[0]['level'])->toBe('warning');
+});
+
+it('persists the refresh a disconnect makes when the provider is asked before forget()', function () {
+    // The documented order: disconnect at the provider, then forget(). The refresh
+    // inside disconnectTenant() lands in a row that is still active.
+    $repo = app(ConnectionStore::class);
+    app(ConnectionRepository::class)->save(tenantConnection('tenant-1', 'access-old', 'refresh-old', 'org-order'));
+
+    $fake = fakeHttp();
+    $fake->queue(200, ['access_token' => 'fresh-token', 'refresh_token' => 'fresh-refresh', 'expires_in' => 1800]);
+    $fake->queue(200, [['id' => 'conn-1', 'tenantId' => 'tenant-1']]);
+    $fake->queueRaw(204, '');
+
+    $connector = new XeroConnector(
+        http: httpClientOver($fake, maxRetries: 0),
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        redirectUri: 'https://app.test/callback',
+        connections: $repo,
+    );
+
+    $expired = new Connection(
+        provider: Provider::Xero,
+        tenantId: 'tenant-1',
+        accessToken: 'access-old',
+        refreshToken: 'refresh-old',
+        expiresAt: (new DateTimeImmutable)->modify('-1 hour'),
+        reference: 'org-order',
+    );
+
+    expect($connector->disconnectTenant($expired))->toBe(DisconnectOutcome::Removed)
+        ->and(app(ConnectionRepository::class)->find('org-order', Provider::Xero)->accessToken)->toBe('fresh-token');
+
+    app(ConnectionRepository::class)->forget('org-order', Provider::Xero);
+
+    expect(app(ConnectionRepository::class)->find('org-order', Provider::Xero))->toBeNull();
+});
+
+it('skips a stale refresh without throwing when the logger itself fails', function () {
+    // The stale-row skip is an expected race; a logger that cannot write must not
+    // turn it into a failed refresh, and must not let the stale tokens through.
+    $logger = new class extends AbstractLogger
+    {
+        public function log($level, string|Stringable $message, array $context = []): void
+        {
+            throw new RuntimeException('the log channel is down');
+        }
+    };
+    $repo = new DatabaseConnectionRepository(resolver: app('db'), encrypter: app('encrypter'), logger: $logger);
+
+    $repo->save(tenantConnection('tenant-A', 'access-A', 'refresh-A'));
+    $inFlight = $repo->find('org-reconnect', Provider::Xero);
+    $repo->save(tenantConnection('tenant-B', 'access-B', 'refresh-B'));
+
+    $repo->persist($inFlight->withTokens(new TokenSet('refreshed-access-A', 'refreshed-refresh-A', (new DateTimeImmutable)->modify('+30 minutes'))));
+
+    $stored = $repo->find('org-reconnect', Provider::Xero);
+    expect($stored->tenantId)->toBe('tenant-B')
+        ->and($stored->accessToken)->toBe('access-B')
+        ->and($stored->refreshToken)->toBe('refresh-B');
 });

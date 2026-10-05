@@ -10,6 +10,7 @@ use Hei\AccountingConnector\Data\LineItem;
 use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Data\TenantInfo;
+use Hei\AccountingConnector\Enums\DisconnectOutcome;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
@@ -286,4 +287,17 @@ it('clears recorded contacts and queued contact ids on flush', function () {
 
     expect($fake->contacts)->toBeEmpty()
         ->and($fake->resolveContact(ContactData::vendor('Acme Supply'), connection()))->toBe('fake-contact-1');
+});
+
+it('forgets disconnected tenants and a scripted disconnect outcome on flush', function () {
+    // A fake reused across tests must not answer NotConnected for a tenant an
+    // earlier test disconnected, nor hand out an outcome an earlier test queued.
+    $fake = new FakeConnector;
+    $fake->disconnectTenant(connection());
+    $fake->nextDisconnectOutcome(DisconnectOutcome::Unconfirmed);
+
+    $fake->flush();
+
+    expect($fake->disconnectedTenants)->toBeEmpty()
+        ->and($fake->disconnectTenant(connection()))->toBe(DisconnectOutcome::Removed);
 });
