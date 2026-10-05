@@ -431,7 +431,7 @@ The package emits PSR-14 events; storing those events is the host's responsibili
 | `EntityCreated` | provider confirmed the id, before any attachment | `externalId` — record it immediately |
 | `EntityCreateFailed` | a create was refused or returned no id | `retryable` — validation needs a human, a rate limit just needs the job re-run |
 | `AttachmentUploaded` | an attachment attempt finished, either way | `result->uploaded` |
-| `TokensRefreshed` | tokens renewed and already persisted | observability only: do not persist from here. A listener that throws is logged and the call carries on with the new tokens |
+| `TokensRefreshed` | tokens renewed, after the store was asked to persist them | observability only: do not persist from here, and do not read it as proof the tokens were stored (the store skips a stale row: a tenant since reconnected away from, or a connection no longer active). A listener that throws is logged and the call carries on with the new tokens |
 | `ConnectionRevoked` | the grant is dead, a human must reconnect | `reason` |
 
 One deliberate gap: a create that dies in the pre-create token refresh raises (and, on a dead
