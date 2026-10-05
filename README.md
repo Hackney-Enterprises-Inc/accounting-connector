@@ -278,7 +278,7 @@ achieves nothing. (But see the concurrency note above before treating the first 
 
 ## Existing bank transactions (Xero)
 
-Xero implements five optional contracts beyond `AccountingConnector`. Check them with
+Xero implements six optional contracts beyond `AccountingConnector`. Check them with
 `instanceof` before use; the QuickBooks connector does not implement them.
 
 | Contract | Methods | Purpose |
@@ -286,6 +286,7 @@ Xero implements five optional contracts beyond `AccountingConnector`. Check them
 | `ReadsBankTransactions` | `listBankTransactions()`, `findBankTransaction()` | Page through existing transactions or re-read one before matching |
 | `CodesBankTransactions` | `recodeBankTransaction()`, `updateBankTransactionCoding()`, `deleteBankTransaction()` | Change coding or delete a transaction |
 | `FindsContacts` | `findContactByName()` | Find an existing contact without creating one |
+| `FindsManualJournals` | `findManualJournalsByMarker()` | Find the manual journals whose narration carries a marker the host wrote, to settle a create whose outcome was lost |
 | `ListsContacts` | `contacts()` | Walk every contact, archived and merged ones included, optionally only those changed since an instant |
 | `VoidsInvoices` | `findInvoice()`, `voidInvoice()` | Re-read a posted bill's status, or take it out of the books when it should not have been posted |
 
@@ -330,6 +331,41 @@ being gone. Money applied stops a void: `InvoiceHasPaymentsException` is thrown 
 when the read shows it and after the write when Xero refuses, carrying Xero's own wording in
 `providerMessage`, and the person has to remove the payment in Xero first. Pass an idempotency
 key for retries.
+
+### Finding a journal after an uncertain create
+
+Xero remembers an `Idempotency-Key` for minutes. A journal create that timed out, or answered
+without an id, can be re-sent under the same key inside that window; past it a re-send may post
+the journal twice. `findManualJournalsByMarker($connection, $marker)` is the way out: write a
+unique marker (an operation id; a UUID qualifies) into the journal's narration when you create it,
+and look for that marker instead of re-sending.
+
+```php
+if ($connector instanceof FindsManualJournals) {
+    $journals = $connector->findManualJournalsByMarker($connection, $operationId);
+
+    // []: Xero holds no journal with this marker in this tenant. Exactly one: it landed.
+    // More than one: refuse and ask a person; never pick.
+}
+```
+
+The marker is 8 to 100 letters, digits, `_` and `-`, starting with a letter or digit; anything
+else throws `InvalidPayloadException` before a request, because Xero's `where` has no escape
+syntax. The connector asks Xero for `Narration.Contains(marker)`, then checks every row it gets
+back itself: a journal is returned only when the marker appears exactly, case-sensitive, as a
+whole token (not touching a letter, digit, `_` or `-`). Xero's filter only narrows the read.
+
+The answer is complete or it throws. With Xero's `pagination.itemCount` the read ends when that
+many distinct journals were read; without it only an empty page ends the read, which costs one
+extra call. Counts that do not add up, a journal seen twice, a page without a `ManualJournals`
+list or more than `XeroConnector::MANUAL_JOURNAL_MAX_PAGES` pages throw `ServerException`, so an
+empty list always means "not there", never "could not tell". Every status comes back (`isPosted()`,
+`isVoidedOrDeleted()` on `ManualJournal`), only the connection's tenant is searched, and each
+journal carries that tenant in `tenantId`.
+
+Not yet verified against a live Xero organisation: whether Xero's Contains is case-sensitive,
+whether it always sends `itemCount`, and whether voided journals are listed. The lookup is right
+under either answer; contract case 8 (`composer test:contract`) records which one Xero gives.
 
 ## Events
 
@@ -519,10 +555,17 @@ For testing the connectors themselves, `FakeHttpClient` is a PSR-18 client that 
 queue, and `tests/Fixtures/{xero,quickbooks}/` holds doc-derived JSON responses for both
 providers.
 
-`FakeConnector` also implements the four optional bank-transaction and contact contracts.
+`FakeConnector` also implements the optional bank-transaction and contact contracts.
 Seed it with `withBankTransactions(...)` and `withContacts(...)` to test matching, recoding and
 contact syncing without HTTP calls; `contacts()` honours `$modifiedSince` against each seeded
 contact's `updatedAt` and records every call in `$contactListings`.
+
+It implements `FindsManualJournals` too, with the real connector's marker rules. A journal
+created through it lands in `$manualJournals` and becomes findable in the connection's tenant;
+`withManualJournals(...)` seeds more (a `ManualJournal` with no `tenantId` is in every tenant).
+`failNextCreateAfterLanding($e)` makes the next create land and then throw, the timeout-after-write
+case the lookup exists for, while `failNextCreate($e)` lands nothing. `failNextManualJournalLookup($e)`
+fails one lookup, and every lookup is recorded in `$manualJournalLookups`.
 
 `tenantInfo()` reports a default "Fake Company", or the `TenantInfo` you assign to `$tenant`;
 `withoutTenantInfo()` makes it return null. `withLockDates($periodLockDate, $endOfYearLockDate)`

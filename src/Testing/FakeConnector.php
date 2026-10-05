@@ -12,6 +12,7 @@ use Hei\AccountingConnector\Contracts\AccountingConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
+use Hei\AccountingConnector\Contracts\FindsManualJournals;
 use Hei\AccountingConnector\Contracts\ListsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Contracts\VoidsInvoices;
@@ -30,7 +31,9 @@ use Hei\AccountingConnector\Data\Contact;
 use Hei\AccountingConnector\Data\ContactData;
 use Hei\AccountingConnector\Data\ExpenseData;
 use Hei\AccountingConnector\Data\InvoiceState;
+use Hei\AccountingConnector\Data\JournalData;
 use Hei\AccountingConnector\Data\LineCoding;
+use Hei\AccountingConnector\Data\ManualJournal;
 use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\RawPayload;
 use Hei\AccountingConnector\Data\RecodeExpectation;
@@ -42,12 +45,14 @@ use Hei\AccountingConnector\Data\TrackingCategory;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
+use Hei\AccountingConnector\Enums\TransactionStatus;
 use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
 use Hei\AccountingConnector\Exceptions\InvoiceHasPaymentsException;
 use Hei\AccountingConnector\Exceptions\NotFoundException;
 use Hei\AccountingConnector\Exceptions\PreconditionFailedException;
 use Hei\AccountingConnector\Exceptions\RecodeMovedMoneyException;
 use Hei\AccountingConnector\Exceptions\UnsupportedEntityTypeException;
+use Hei\AccountingConnector\Support\NarrationMarker;
 use Hei\AccountingConnector\Support\RecodeInvariants;
 use Throwable;
 
@@ -66,7 +71,7 @@ use Throwable;
  *     expect($fake->created)->toHaveCount(1);
  *     expect($fake->createdOf(EntityType::Bill))->toHaveCount(1);
  */
-final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions, VoidsInvoices
+final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, FindsManualJournals, ListsContacts, ReadsBankTransactions, VoidsInvoices
 {
     /**
      * Every create, in order. `direction` is set for an expense so a host can assert a
@@ -182,6 +187,27 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     /** Thrown by the next create, then cleared. */
     private ?Throwable $nextFailure = null;
 
+    /** Whether the next create's failure comes after it landed (see failNextCreateAfterLanding()). */
+    private bool $nextFailureLanded = false;
+
+    /**
+     * The manual journals this fake pretends the customer's books hold, in the order
+     * seeded or created. A journal whose tenantId is null is in every tenant.
+     *
+     * @var array<int, ManualJournal>
+     */
+    public array $manualJournals = [];
+
+    /**
+     * Every findManualJournalsByMarker() call, in order.
+     *
+     * @var array<int, array{marker: string, tenant_id: string}>
+     */
+    public array $manualJournalLookups = [];
+
+    /** Thrown by the next manual journal lookup, then cleared. */
+    private ?Throwable $nextManualJournalLookupFailure = null;
+
     /** Returned by the next attach, then cleared. */
     private ?AttachmentResult $nextAttachmentResult = null;
 
@@ -226,6 +252,9 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
 
     private int $sequence = 0;
 
+    /** Ids for journals that landed without the caller being told, kept off $sequence. */
+    private int $unreportedSequence = 0;
+
     /** @var array<string, bool> */
     private array $unsupported = [];
 
@@ -261,6 +290,7 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     public function failNextCreate(Throwable $exception): self
     {
         $this->nextFailure = $exception;
+        $this->nextFailureLanded = false;
 
         return $this;
     }
@@ -274,6 +304,19 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     public function nextCreateReturnsNoId(): self
     {
         $this->nextCreateReturnsNoId = true;
+
+        return $this;
+    }
+
+    /**
+     * Make the next create land and then throw, as a timeout after the provider
+     * wrote would: the entity exists (a journal becomes findable by its marker, and
+     * the call is recorded in $created) but the caller only sees the exception.
+     */
+    public function failNextCreateAfterLanding(Throwable $exception): self
+    {
+        $this->nextFailure = $exception;
+        $this->nextFailureLanded = true;
 
         return $this;
     }
@@ -441,11 +484,18 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     ): ?string {
         $this->assertAcceptable($type, $payload);
 
+        $landedFailure = null;
+
         if ($this->nextFailure !== null) {
             $failure = $this->nextFailure;
             $this->nextFailure = null;
 
-            throw $failure;
+            if (! $this->nextFailureLanded) {
+                throw $failure;
+            }
+
+            $this->nextFailureLanded = false;
+            $landedFailure = $failure;
         }
 
         $this->created[] = [
@@ -456,13 +506,37 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
             'direction' => $payload instanceof ExpenseData ? $payload->direction : null,
         ];
 
+        $reported = $landedFailure === null && ! $this->nextCreateReturnsNoId;
+        // The sequence moves only for an id the caller is handed, as it always has,
+        // so a host asserting on fake ids sees the same ones it did before.
+        $id = $reported
+            ? sprintf('fake-%s-%d', $type->value, ++$this->sequence)
+            : sprintf('fake-%s-unreported-%d', $type->value, ++$this->unreportedSequence);
+
+        // A journal that landed is in the books whatever the caller heard back, so
+        // a marker lookup finds it: the recovery path the lookup exists for.
+        if ($payload instanceof JournalData) {
+            $this->manualJournals[] = new ManualJournal(
+                id: $id,
+                narration: $payload->narration,
+                status: $payload->status === TransactionStatus::Draft ? ManualJournal::STATUS_DRAFT : ManualJournal::STATUS_POSTED,
+                date: $payload->date,
+                updatedAt: new DateTimeImmutable,
+                tenantId: $connection->tenantId,
+            );
+        }
+
+        if ($landedFailure !== null) {
+            throw $landedFailure;
+        }
+
         if ($this->nextCreateReturnsNoId) {
             $this->nextCreateReturnsNoId = false;
 
             return null;
         }
 
-        return sprintf('fake-%s-%d', $type->value, ++$this->sequence);
+        return $id;
     }
 
     public function updateEntity(
@@ -1036,6 +1110,79 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     }
 
     /**
+     * Stock the fake with manual journals for findManualJournalsByMarker().
+     *
+     * A journal with a tenantId is only in that tenant; one without is in every
+     * tenant. Seeding an id again for the same tenant replaces that journal.
+     */
+    public function withManualJournals(ManualJournal ...$journals): self
+    {
+        foreach ($journals as $journal) {
+            $this->manualJournals = array_values(array_filter(
+                $this->manualJournals,
+                fn (ManualJournal $known): bool => ! ($known->id === $journal->id && $known->tenantId === $journal->tenantId),
+            ));
+            $this->manualJournals[] = $journal;
+        }
+
+        return $this;
+    }
+
+    /**
+     * Make the next manual journal lookup throw, then clear: for a read the real
+     * connector could not prove complete (ServerException) or a dead connection.
+     */
+    public function failNextManualJournalLookup(Throwable $exception): self
+    {
+        $this->nextManualJournalLookupFailure = $exception;
+
+        return $this;
+    }
+
+    /**
+     * Every seeded or created journal in the connection's tenant whose narration
+     * carries the marker, by the same exact, whole-token rule as the real connector,
+     * in the order seeded. Each comes back carrying the connection's tenant. Rejects
+     * a marker the real connector would, records the call in $manualJournalLookups
+     * and honours failLookups().
+     */
+    public function findManualJournalsByMarker(Connection $connection, string $marker): array
+    {
+        $this->manualJournalLookups[] = ['marker' => $marker, 'tenant_id' => $connection->tenantId];
+
+        NarrationMarker::assertUsable($marker, $this->provider);
+        $this->guardLookups();
+
+        if ($this->nextManualJournalLookupFailure !== null) {
+            $failure = $this->nextManualJournalLookupFailure;
+            $this->nextManualJournalLookupFailure = null;
+
+            throw $failure;
+        }
+
+        $found = [];
+
+        foreach ($this->manualJournals as $journal) {
+            if ($journal->tenantId !== null && $journal->tenantId !== $connection->tenantId) {
+                continue;
+            }
+
+            if (NarrationMarker::matches($journal->narration, $marker)) {
+                $found[] = new ManualJournal(
+                    id: $journal->id,
+                    narration: $journal->narration,
+                    status: $journal->status,
+                    date: $journal->date,
+                    updatedAt: $journal->updatedAt,
+                    tenantId: $connection->tenantId,
+                );
+            }
+        }
+
+        return $found;
+    }
+
+    /**
      * Make the next recode come back with this transaction, whatever was asked.
      *
      * For the moved-money path: hand back a copy with a different total and the
@@ -1219,11 +1366,16 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         $this->contacts = [];
         $this->refreshed = [];
         $this->sequence = 0;
+        $this->unreportedSequence = 0;
         $this->lookupRefreshes = 0;
         $this->nextCreateReturnsNoId = false;
         $this->tenantUnknown = false;
         $this->lookupFailure = null;
         $this->nextFailure = null;
+        $this->nextFailureLanded = false;
+        $this->manualJournals = [];
+        $this->manualJournalLookups = [];
+        $this->nextManualJournalLookupFailure = null;
         $this->nextAttachmentResult = null;
         $this->contactIds = [];
         $this->resolvedContactIds = [];
