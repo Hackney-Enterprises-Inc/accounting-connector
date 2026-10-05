@@ -5,6 +5,54 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-05
+
+### Added
+
+- `DisconnectsTenants`, an optional capability (ask with `instanceof`) with one method,
+  `disconnectTenant(Connection $connection): DisconnectOutcome`, for a host's Disconnect
+  button. It removes the tenant's connection at the provider and says which of three things
+  happened, which the core `revoke()` bool cannot: `Removed` (deleted now), `NotConnected`
+  (the provider was read and holds no connection for the tenant, or the delete answered
+  404: already gone, a clean disconnect) or `Unconfirmed` (a rejected refresh, a failed or
+  unreadable listing, a refused delete, a transport error). It never throws. On Xero it
+  refreshes an expired token, walks `GET /connections` and deletes only the entry for the
+  connection's tenant, so other organisations connected through the same Xero user stay
+  connected; the refresh token is not revoked at the identity endpoint, because that would
+  remove all of them. The Xero connector implements it; QuickBooks does not.
+- `DisconnectOutcome`, with `isSettled()`: true when nothing is left for a person to remove
+  at the provider.
+- `FakeConnector` implements `DisconnectsTenants`: removed tenants are recorded in
+  `$disconnectedTenants`, a second disconnect of the same tenant answers `NotConnected`, and
+  `nextDisconnectOutcome()` scripts the next answer.
+
+### Fixed
+
+- Credentials integrity: `DatabaseConnectionRepository::persist()` (the `ConnectionStore` the
+  connectors write refreshed tokens to) matched the row on owner and provider only. A refresh
+  that started before the owner reconnected to a different tenant, and landed after, wrote the
+  old tenant's tokens under the new tenant's id: the new connection's working credentials were
+  overwritten. It now writes only into the row for the same tenant with status `active`, so that
+  refresh, and one landing after a revocation or a host's own disconnect, persists nothing and is
+  logged as a warning that says why (distinct from the error for a missing row). No schema
+  change. Hosts with their own `ConnectionRevoked` listener should scope it to the tenant too.
+- `attach()` could throw despite its contract: the `AttachmentUploaded` event was dispatched
+  outside the catch (also on the too-large path), and the error logged in the catch was not
+  protected. A throwing listener or logger failed a posting job after the entity existed, and
+  the retry posted twice. A listener failure is now logged at error (when the logger works) and
+  the result is returned; a logger failure is ignored. The same protection now covers `revoke()`
+  on both connectors, `disconnectTenant()`, and the decrypt-failure log in
+  `DatabaseConnectionRepository`.
+
+### Changed
+
+- `XeroConnector::revoke()` delegates to `disconnectTenant()` and is true only for
+  `Removed`. Same answers as before for a well-formed listing. The listing is now read
+  strictly: it must be a JSON list whose every entry has a non-empty string `id` and
+  `tenantId`, or the answer is `Unconfirmed` (false from `revoke()`) and nothing is deleted.
+  An object such as `{}`, which an associative decode reads as an empty list, a `null` or
+  partial entry no longer reads as "not connected". The id is URL-encoded.
+
 ## [0.6.0] - 2026-10-05
 
 ### Added

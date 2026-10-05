@@ -10,6 +10,7 @@ use DateTimeInterface;
 use DateTimeZone;
 use Hei\AccountingConnector\Contracts\AccountingConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
+use Hei\AccountingConnector\Contracts\DisconnectsTenants;
 use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
 use Hei\AccountingConnector\Contracts\FindsManualJournals;
@@ -42,6 +43,7 @@ use Hei\AccountingConnector\Data\TaxCode;
 use Hei\AccountingConnector\Data\TenantInfo;
 use Hei\AccountingConnector\Data\TokenSet;
 use Hei\AccountingConnector\Data\TrackingCategory;
+use Hei\AccountingConnector\Enums\DisconnectOutcome;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\MoneyDirection;
 use Hei\AccountingConnector\Enums\Provider;
@@ -71,7 +73,7 @@ use Throwable;
  *     expect($fake->created)->toHaveCount(1);
  *     expect($fake->createdOf(EntityType::Bill))->toHaveCount(1);
  */
-final class FakeConnector implements AccountingConnector, CodesBankTransactions, FindsContacts, FindsManualJournals, ListsContacts, ReadsBankTransactions, VoidsInvoices
+final class FakeConnector implements AccountingConnector, CodesBankTransactions, DisconnectsTenants, FindsContacts, FindsManualJournals, ListsContacts, ReadsBankTransactions, VoidsInvoices
 {
     /**
      * Every create, in order. `direction` is set for an expense so a host can assert a
@@ -92,6 +94,16 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
 
     /** @var array<int, Connection> */
     public array $refreshed = [];
+
+    /**
+     * Tenants whose connection disconnectTenant() removed, in order. A second
+     * disconnect of the same tenant answers NotConnected, as Xero would.
+     *
+     * @var array<int, string>
+     */
+    public array $disconnectedTenants = [];
+
+    private ?DisconnectOutcome $nextDisconnectOutcome = null;
 
     /** @var array<int, Account> */
     public array $accounts = [];
@@ -419,6 +431,39 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
     public function revoke(Connection $connection): bool
     {
         return true;
+    }
+
+    /**
+     * Make the next disconnectTenant() answer this, whatever the fake holds. An
+     * Unconfirmed answer records nothing, so a later disconnect can still remove it.
+     */
+    public function nextDisconnectOutcome(DisconnectOutcome $outcome): self
+    {
+        $this->nextDisconnectOutcome = $outcome;
+
+        return $this;
+    }
+
+    public function disconnectTenant(Connection $connection): DisconnectOutcome
+    {
+        $scripted = $this->nextDisconnectOutcome;
+        $this->nextDisconnectOutcome = null;
+
+        if ($scripted !== null) {
+            if ($scripted === DisconnectOutcome::Removed && ! in_array($connection->tenantId, $this->disconnectedTenants, true)) {
+                $this->disconnectedTenants[] = $connection->tenantId;
+            }
+
+            return $scripted;
+        }
+
+        if (in_array($connection->tenantId, $this->disconnectedTenants, true)) {
+            return DisconnectOutcome::NotConnected;
+        }
+
+        $this->disconnectedTenants[] = $connection->tenantId;
+
+        return DisconnectOutcome::Removed;
     }
 
     public function tenantInfo(Connection $connection): ?TenantInfo

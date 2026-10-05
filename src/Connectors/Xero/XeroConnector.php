@@ -9,6 +9,7 @@ use DateTimeInterface;
 use DateTimeZone;
 use Hei\AccountingConnector\Connectors\AbstractConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
+use Hei\AccountingConnector\Contracts\DisconnectsTenants;
 use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
 use Hei\AccountingConnector\Contracts\FindsManualJournals;
@@ -47,6 +48,7 @@ use Hei\AccountingConnector\Data\TrackingOption;
 use Hei\AccountingConnector\Data\TrackingRef;
 use Hei\AccountingConnector\Enums\AccountClass;
 use Hei\AccountingConnector\Enums\BankTransactionType;
+use Hei\AccountingConnector\Enums\DisconnectOutcome;
 use Hei\AccountingConnector\Enums\EntityType;
 use Hei\AccountingConnector\Enums\LineAmountType;
 use Hei\AccountingConnector\Enums\Provider;
@@ -82,7 +84,7 @@ use Hei\AccountingConnector\Support\RecodeInvariants;
  * HttpClient honours Retry-After and asks a RequestGate before every attempt; the
  * host still needs to keep its queue concurrency modest and to budget a long walk.
  */
-final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, FindsManualJournals, ListsContacts, ReadsBankTransactions, VoidsInvoices
+final class XeroConnector extends AbstractConnector implements CodesBankTransactions, DisconnectsTenants, FindsContacts, FindsManualJournals, ListsContacts, ReadsBankTransactions, VoidsInvoices
 {
     /** Contacts per GET Contacts page; Xero's own default and documented page size. */
     public const CONTACT_PAGE_SIZE = 100;
@@ -230,60 +232,120 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
 
     public function revoke(Connection $connection): bool
     {
-        // Xero revokes a connection by deleting it, which needs the connection id
-        // rather than the tenant id, so the list has to be walked first.
+        return $this->disconnectTenant($connection) === DisconnectOutcome::Removed;
+    }
+
+    /**
+     * Delete this tenant's connection, found by walking the connections listing.
+     *
+     * Xero revokes a connection by deleting it, and a connection is keyed by its own
+     * id rather than by the tenant id, so the list has to be walked first. Only this
+     * tenant's entry is deleted: one user's token can list several organisations,
+     * and the refresh token is deliberately not revoked at the identity endpoint,
+     * because that would remove every one of them.
+     */
+    public function disconnectTenant(Connection $connection): DisconnectOutcome
+    {
         try {
             try {
                 // Best effort deserves a live token: with an expired one every
-                // revocation attempt 401s and the connection is left dangling at
-                // Xero. If the refresh itself fails, proceed with what we have and
-                // let the listing fail into the false this is allowed to return.
+                // attempt 401s and the connection is left dangling at Xero.
                 $connection = $this->fresh($connection);
+            } catch (ConnectionRevokedException) {
+                // Rejected outright: the customer may have removed the app in Xero,
+                // or the token lapsed with the connection still listed. Nothing
+                // can be asked any more, so nothing can be confirmed.
+                return DisconnectOutcome::Unconfirmed;
             } catch (AccountingConnectorException) {
-                // Deliberately ignored.
+                // Proceed with what we have and let the listing answer.
             }
 
-            $listing = $this->http->send('GET', self::CONNECTIONS_URL, [
+            $headers = [
                 'Authorization' => 'Bearer '.$connection->accessToken,
                 'Accept' => 'application/json',
-            ], null, $this->provider());
+            ];
+
+            $listing = $this->http->send('GET', self::CONNECTIONS_URL, $headers, null, $this->provider());
 
             if ($listing->failed()) {
-                return false;
+                return DisconnectOutcome::Unconfirmed;
             }
 
-            $decoded = json_decode($listing->body, true);
+            $entries = self::connectionEntries($listing->body);
 
-            foreach (is_array($decoded) ? $decoded : [] as $entry) {
-                if (! is_array($entry) || ($entry['tenantId'] ?? null) !== $connection->tenantId) {
+            // NotConnected is a claim that the tenant is gone. Only a JSON list whose
+            // every entry is a readable connection can carry it: an object (which an
+            // associative decode turns into an empty list), a null or partial entry
+            // might be this very tenant.
+            if ($entries === null) {
+                return DisconnectOutcome::Unconfirmed;
+            }
+
+            foreach ($entries as [$connectionId, $tenantId]) {
+                if ($tenantId !== $connection->tenantId) {
                     continue;
                 }
 
-                $deleted = $this->http->send(
-                    'DELETE',
-                    self::CONNECTIONS_URL.'/'.$entry['id'],
-                    [
-                        'Authorization' => 'Bearer '.$connection->accessToken,
-                        'Accept' => 'application/json',
-                    ],
-                    null,
-                    $this->provider(),
-                );
+                $deleted = $this->http->send('DELETE', self::CONNECTIONS_URL.'/'.rawurlencode($connectionId), $headers, null, $this->provider());
 
-                return $deleted->successful();
+                return match (true) {
+                    $deleted->successful() => DisconnectOutcome::Removed,
+                    $deleted->status === 404 => DisconnectOutcome::NotConnected,
+                    default => DisconnectOutcome::Unconfirmed,
+                };
             }
 
-            return false;
+            return DisconnectOutcome::NotConnected;
         } catch (\Throwable $e) {
-            // Best effort by design. The local disconnect must happen regardless, or
-            // the customer is left holding credentials they cannot get rid of.
-            $this->logger->warning('Could not revoke the Xero connection at Xero.', [
+            // Never thrown: the host's local disconnect must happen regardless, or the
+            // customer is left holding credentials they cannot get rid of.
+            $this->logQuietly('warning', 'Could not remove the Xero connection at Xero.', [
                 'connection' => $connection->reference,
                 'error' => $e->getMessage(),
             ]);
 
-            return false;
+            return DisconnectOutcome::Unconfirmed;
         }
+    }
+
+    /**
+     * A GET /connections body as [connection id, tenant id] pairs, or null unless it is a
+     * JSON list whose every entry is an object with a non-empty string `id` and
+     * `tenantId`. Decoded without the associative flag so `{}` stays an object rather
+     * than reading as an empty list.
+     *
+     * @return list<array{0: string, 1: string}>|null
+     */
+    private static function connectionEntries(string $body): ?array
+    {
+        try {
+            $decoded = json_decode($body, false, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+
+        if (! is_array($decoded) || ! array_is_list($decoded)) {
+            return null;
+        }
+
+        $entries = [];
+
+        foreach ($decoded as $entry) {
+            if (! $entry instanceof \stdClass) {
+                return null;
+            }
+
+            $id = $entry->id ?? null;
+            $tenantId = $entry->tenantId ?? null;
+
+            if (! is_string($id) || $id === '' || ! is_string($tenantId) || $tenantId === '') {
+                return null;
+            }
+
+            $entries[] = [$id, $tenantId];
+        }
+
+        return $entries;
     }
 
     public function tenantInfo(Connection $connection): ?TenantInfo

@@ -170,7 +170,7 @@ final class QuickBooksConnector extends AbstractConnector
             return $response->successful();
         } catch (\Throwable $e) {
             // Swallowed on purpose: the local disconnect has to happen either way.
-            $this->logger->warning('Could not revoke the QuickBooks connection at Intuit.', [
+            $this->logQuietly('warning', 'Could not revoke the QuickBooks connection at Intuit.', [
                 'connection' => $connection->reference,
                 'error' => $e->getMessage(),
             ]);
