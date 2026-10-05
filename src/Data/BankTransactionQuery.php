@@ -14,7 +14,8 @@ use Hei\AccountingConnector\Exceptions\InvalidPayloadException;
  * Every field narrows the request at the provider rather than in the host, which
  * matters more here than it does for a lookup: a company with three years of bank
  * feed history holds tens of thousands of these, and Xero allows this app sixty
- * calls a minute and five thousand a day against each connected organisation.
+ * calls a minute and a thousand (Starter tier) or five thousand (Core and above) a
+ * day against each connected organisation.
  *
  * `$modifiedSince` is the one that makes a repeating sync affordable. It becomes an
  * If-Modified-Since header rather than part of the filter, and it is compared

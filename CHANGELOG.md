@@ -5,6 +5,55 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-05
+
+### Added
+
+- `FindsManualJournals`, an optional capability (ask with `instanceof`) with one method,
+  `findManualJournalsByMarker(Connection $connection, string $marker): array`, returning
+  every `ManualJournal` in the connection's tenant whose narration carries the marker. It
+  is how a host settles a journal create whose outcome was lost after Xero stopped
+  remembering the idempotency key: look for the marker it wrote, instead of re-sending.
+  The marker is 8 to 100 letters, digits, `_` and `-` (a UUID qualifies); anything else
+  throws `InvalidPayloadException` before a request. Xero is asked for
+  `Narration.Contains(marker)` and every row is re-checked locally, exact, case-sensitive
+  and whole-token. The read is complete or throws `ServerException`: it ends on a matched
+  `pagination.itemCount` or, without counts, on an empty page, and a row seen twice, a
+  moving count, a page with no list or more than `XeroConnector::MANUAL_JOURNAL_MAX_PAGES`
+  pages is refused rather than read as "none". Every status is returned; more than one
+  match is returned as found, for the host to refuse. The Xero connector implements it;
+  QuickBooks does not.
+- `ManualJournal`, the read-side journal: id, narration, upper-case status, date,
+  updated instant and the tenant it was read from, with `isPosted()`,
+  `isVoidedOrDeleted()` and `toArray()`.
+- `NarrationMarker`, the marker rules shared by the connector and the fake.
+- `FakeConnector` implements `FindsManualJournals`: journals created through it become
+  findable in the tenant they were posted to, `withManualJournals(...)` seeds more,
+  `failNextCreateAfterLanding()` lands a create and then throws (the timeout-after-write
+  case), `failNextManualJournalLookup()` fails one lookup, and lookups are recorded in
+  `$manualJournalLookups`. Ids handed to callers are unchanged: a create that throws or
+  answers without an id does not advance them.
+- Contract case 8 records, against a live demo company, whether Xero's Contains is
+  case-sensitive, whether `itemCount` is sent and whether voided journals are listed.
+
+### Changed
+
+- Documentation only: the Xero daily allowance is now described the same way everywhere.
+  It is 1,000 calls per organisation on Xero's Starter app tier and 5,000 on Core and
+  above. The tier is the app's subscription, and certification does not change it.
+  The `XeroConnector`, `RateLimitException`, `RequestGate` and `BankTransactionQuery`
+  docblocks and the published config's comment said 5,000 once certified and 1,000
+  before, or 5,000 flat. No message or behaviour changed.
+- Development dependencies; no change to `require`. The
+  `require-dev` constraints widen to `guzzlehttp/guzzle` `^7.8|^8.0` and `pestphp/pest`
+  `^3.5|^4.0|^5.0`, so the suite runs against Guzzle 8 (PSR-7 3.x) and, on PHP 8.4,
+  Pest 5 (PHPUnit 13). Guzzle stays a development dependency: the Laravel provider
+  builds a Guzzle client only when the host already has one, and the HTTP layer catches
+  the PSR-18 `ClientExceptionInterface`, so it is verified against both Guzzle 7 and 8
+  rather than requiring either. The in-range updates (Pint 1.32, Testbench 11.3,
+  PHPStan 2.2.17) and the transitive ones clear four advisories in development-only
+  packages (laravel/framework, league/commonmark, league/flysystem).
+
 ## [0.5.0] - 2026-10-03
 
 ### Added

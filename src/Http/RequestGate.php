@@ -14,8 +14,8 @@ use Throwable;
  * Asked once before every attempt {@see HttpClient} makes, retries included. The
  * package's own retry policy only reacts to a limit after the provider has refused
  * a request; this is where a host spends its allowance deliberately instead. Xero
- * meters each app per connected organisation (sixty calls a minute, five thousand a
- * day, five in flight), and a background walk of four years of bank transactions
+ * meters each app per connected organisation (sixty calls a minute, a thousand a day
+ * on the Starter app tier or five thousand on Core and above, five in flight), and a background walk of four years of bank transactions
  * has to leave room for the approval that lands in the middle of it.
  *
  * An implementation may block briefly until a slot is free, or throw

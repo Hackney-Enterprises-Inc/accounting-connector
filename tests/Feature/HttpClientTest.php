@@ -15,8 +15,6 @@ use Psr\Http\Client\ClientInterface;
 use Psr\Http\Client\NetworkExceptionInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
-use RuntimeException;
-use Throwable;
 
 function clientWithSleeper(FakeHttpClient $fake, NullSleeper $sleeper, int $retries = 3): HttpClient
 {

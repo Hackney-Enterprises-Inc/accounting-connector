@@ -11,6 +11,7 @@ use Hei\AccountingConnector\Connectors\AbstractConnector;
 use Hei\AccountingConnector\Contracts\CodesBankTransactions;
 use Hei\AccountingConnector\Contracts\EntityPayload;
 use Hei\AccountingConnector\Contracts\FindsContacts;
+use Hei\AccountingConnector\Contracts\FindsManualJournals;
 use Hei\AccountingConnector\Contracts\ListsContacts;
 use Hei\AccountingConnector\Contracts\ReadsBankTransactions;
 use Hei\AccountingConnector\Contracts\VoidsInvoices;
@@ -32,6 +33,7 @@ use Hei\AccountingConnector\Data\InvoiceData;
 use Hei\AccountingConnector\Data\InvoiceState;
 use Hei\AccountingConnector\Data\JournalData;
 use Hei\AccountingConnector\Data\LineCoding;
+use Hei\AccountingConnector\Data\ManualJournal;
 use Hei\AccountingConnector\Data\Money;
 use Hei\AccountingConnector\Data\PaymentData;
 use Hei\AccountingConnector\Data\RawPayload;
@@ -61,6 +63,7 @@ use Hei\AccountingConnector\Exceptions\UnsupportedEntityTypeException;
 use Hei\AccountingConnector\Exceptions\ValidationException;
 use Hei\AccountingConnector\Http\HttpResponse;
 use Hei\AccountingConnector\Support\Filename;
+use Hei\AccountingConnector\Support\NarrationMarker;
 use Hei\AccountingConnector\Support\RecodeInvariants;
 
 /**
@@ -72,16 +75,27 @@ use Hei\AccountingConnector\Support\RecodeInvariants;
  * with `Content-Type: application/octet-stream` for attachments.
  *
  * Rate limits worth designing around, each measured per app per connected
- * organisation: 60 calls a minute, 5,000 a day once the app is certified and 1,000
- * before that, and no more than 5 requests in flight at once. They are ours alone;
- * another app the customer has connected spends its own allowance, not this one.
+ * organisation: 60 calls a minute; per day 1,000 on Xero's Starter app tier and
+ * 5,000 on Core and above (the tier is the app's subscription; certification does
+ * not change it); and no more than 5 requests in flight at once. They are ours
+ * alone; another app the customer has connected spends its own allowance.
  * HttpClient honours Retry-After and asks a RequestGate before every attempt; the
  * host still needs to keep its queue concurrency modest and to budget a long walk.
  */
-final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, ListsContacts, ReadsBankTransactions, VoidsInvoices
+final class XeroConnector extends AbstractConnector implements CodesBankTransactions, FindsContacts, FindsManualJournals, ListsContacts, ReadsBankTransactions, VoidsInvoices
 {
     /** Contacts per GET Contacts page; Xero's own default and documented page size. */
     public const CONTACT_PAGE_SIZE = 100;
+
+    /** Manual journals per page of a marker lookup; Xero's documented default. */
+    public const MANUAL_JOURNAL_PAGE_SIZE = 100;
+
+    /**
+     * Pages a marker lookup reads before it gives up. A marker is meant to match one
+     * journal, so even ten pages of candidates means the filter is not narrowing and
+     * the answer cannot be trusted either way.
+     */
+    public const MANUAL_JOURNAL_MAX_PAGES = 10;
 
     private const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
 
@@ -1017,8 +1031,8 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
      * One page of bank transactions, filtered at Xero rather than here.
      *
      * A company with a live bank feed holds tens of thousands of these and this app
-     * is allowed sixty calls a minute and five thousand a day against each
-     * organisation, so everything the caller asked to narrow by becomes part of the
+     * is allowed sixty calls a minute and a thousand (Starter tier) or five thousand
+     * (Core and above) a day against each organisation, so everything the caller asked to narrow by becomes part of the
      * `where` expression and the modified-since instant becomes a header.
      *
      * Every read asks for `unitdp=4`. Xero rounds unit amounts to two places unless
@@ -1599,6 +1613,137 @@ final class XeroConnector extends AbstractConnector implements CodesBankTransact
             $more = is_numeric($pageCount) ? $page < (int) $pageCount : count($rows) >= self::CONTACT_PAGE_SIZE;
             $page++;
         } while ($more && $rows !== []);
+    }
+
+    /**
+     * Every manual journal whose narration carries the marker, read to a proven end.
+     *
+     * GET ManualJournals with `where=Narration!=null&&Narration.Contains("<marker>")`,
+     * `order=ManualJournalID ASC` and `page`/`pageSize` 100. The filter only narrows:
+     * whether Xero's Contains is case-sensitive is not documented, so every row it
+     * returns is checked again with {@see NarrationMarker::matches()}, exact and
+     * whole-token. The null guard is Xero's advice for Contains on an optional string.
+     * The marker's character set (no quote) is what makes the expression safe to build.
+     *
+     * The end of the read has to be proven, the lesson of the host's bank transaction
+     * paging (a short page with no counts cannot be told from a provider paging below
+     * the size asked for). With `pagination.itemCount`, the read ends when the distinct
+     * rows seen reach it, and a later empty page or more rows than counted throws.
+     * Without it, only an empty page ends the read, so an uncounted answer costs one
+     * more call. A row seen twice, a row with no id, a body with no ManualJournals
+     * array or more than MANUAL_JOURNAL_MAX_PAGES pages throws ServerException rather
+     * than answer "none" on a read that may have missed something.
+     *
+     * @return array<int, ManualJournal>
+     */
+    public function findManualJournalsByMarker(Connection $connection, string $marker): array
+    {
+        NarrationMarker::assertUsable($marker, $this->provider());
+
+        $where = 'Narration!=null&&Narration.Contains("'.$marker.'")';
+        $seen = [];
+        $found = [];
+        $itemCount = null;
+
+        for ($page = 1; ; $page++) {
+            if ($page > self::MANUAL_JOURNAL_MAX_PAGES) {
+                throw $this->unprovenJournalRead($marker, sprintf('more than %d pages of candidates', self::MANUAL_JOURNAL_MAX_PAGES));
+            }
+
+            $connection = $this->fresh($connection);
+
+            $response = $this->get($connection, 'ManualJournals', [
+                'where' => $where,
+                'order' => 'ManualJournalID ASC',
+                'page' => $page,
+                'pageSize' => self::MANUAL_JOURNAL_PAGE_SIZE,
+            ]);
+
+            if ($response->failed()) {
+                $this->raise($response, $connection, "the manual journal lookup for '{$marker}'");
+            }
+
+            $rows = $response->get('ManualJournals');
+
+            if (! is_array($rows)) {
+                throw $this->unprovenJournalRead($marker, "page {$page} carried no ManualJournals list");
+            }
+
+            $counted = $response->get('pagination.itemCount');
+
+            if (is_numeric($counted)) {
+                if ($itemCount !== null && $itemCount !== (int) $counted) {
+                    throw $this->unprovenJournalRead($marker, "the item count moved from {$itemCount} to {$counted} during the read");
+                }
+
+                $itemCount = (int) $counted;
+            }
+
+            if ($rows === []) {
+                if ($itemCount !== null && count($seen) !== $itemCount) {
+                    throw $this->unprovenJournalRead($marker, sprintf('Xero counted %d but %d were read before an empty page', $itemCount, count($seen)));
+                }
+
+                return $found;
+            }
+
+            foreach ($rows as $row) {
+                $id = is_array($row) ? ($row['ManualJournalID'] ?? null) : null;
+
+                if (! is_string($id) || $id === '') {
+                    throw $this->unprovenJournalRead($marker, "page {$page} carried a journal with no id");
+                }
+
+                if (isset($seen[$id])) {
+                    throw $this->unprovenJournalRead($marker, "journal {$id} came back twice, so the pages moved underneath the read");
+                }
+
+                $seen[$id] = true;
+                $narration = $row['Narration'] ?? null;
+
+                if (is_string($narration) && NarrationMarker::matches($narration, $marker)) {
+                    $found[] = $this->manualJournal($row, $connection);
+                }
+            }
+
+            if ($itemCount !== null) {
+                if (count($seen) > $itemCount) {
+                    throw $this->unprovenJournalRead($marker, sprintf('Xero counted %d but %d were read', $itemCount, count($seen)));
+                }
+
+                if (count($seen) === $itemCount) {
+                    return $found;
+                }
+            }
+        }
+    }
+
+    private function unprovenJournalRead(string $marker, string $why): ServerException
+    {
+        return new ServerException(
+            "The manual journal lookup for '{$marker}' could not be proven complete: {$why}.",
+            $this->provider(),
+            $why,
+        );
+    }
+
+    /**
+     * @param  array<mixed>  $row  One element of Xero's ManualJournals array, id checked.
+     */
+    private function manualJournal(array $row, Connection $connection): ManualJournal
+    {
+        $status = $row['Status'] ?? null;
+        $date = $row['Date'] ?? null;
+        $updated = $row['UpdatedDateUTC'] ?? null;
+
+        return new ManualJournal(
+            id: (string) $row['ManualJournalID'],
+            narration: (string) $row['Narration'],
+            status: is_string($status) && $status !== '' ? strtoupper($status) : null,
+            date: is_string($date) ? XeroDate::parseDate($date) : null,
+            updatedAt: is_string($updated) ? XeroDate::parse($updated) : null,
+            tenantId: $connection->tenantId,
+        );
     }
 
     /**

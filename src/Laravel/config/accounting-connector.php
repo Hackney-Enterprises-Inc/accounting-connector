@@ -55,10 +55,11 @@ return [
     | never retried: the same rejected payload will be rejected the same way.
     |
     | Xero meters each app per connected organisation: 5 requests in flight, 60
-    | calls a minute and 5,000 a day, none of it shared with other apps the
-    | customer uses. Retries here do not protect you from a queue running 20 sync
-    | workers at once; bind a RequestGate to spend the allowance deliberately and
-    | keep that concurrency low.
+    | calls a minute and 1,000 a day on the Starter app tier or 5,000 on Core and
+    | above, none of it shared with other apps the customer uses. Retries here
+    | do not protect you from a queue running 20 sync workers at once; bind a
+    | RequestGate to spend the allowance deliberately and keep that concurrency
+    | low.
     |
     | Timeouts are in seconds. A discovered Guzzle client waits forever, and a hung
     | provider call inside a scheduled command has nothing else to stop it.
