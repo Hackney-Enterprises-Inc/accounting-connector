@@ -8,7 +8,10 @@ use Hei\AccountingConnector\Contracts\DisconnectsTenants;
 use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Enums\DisconnectOutcome;
 use Hei\AccountingConnector\Enums\Provider;
+use Hei\AccountingConnector\Events\TokensRefreshed;
 use Hei\AccountingConnector\Testing\FakeConnector;
+use Hei\AccountingConnector\Testing\FakeHttpClient;
+use Psr\EventDispatcher\EventDispatcherInterface;
 
 /*
  * Removing the tenant's connection at Xero on a host's Disconnect, and saying which of
@@ -175,4 +178,86 @@ it('lets the fake record disconnects, answer not connected the second time, and 
     expect($fake->disconnectTenant(secondTenant()))->toBe(DisconnectOutcome::Unconfirmed)
         ->and($fake->disconnectTenant(secondTenant()))->toBe(DisconnectOutcome::Removed)
         ->and($fake->disconnectedTenants)->toBe(['tenant-1', 'tenant-2']);
+});
+
+/**
+ * A Xero connector whose TokensRefreshed listener is $listener.
+ */
+function xeroWithRefreshListener(FakeHttpClient $fake, EventDispatcherInterface $listener): XeroConnector
+{
+    return new XeroConnector(
+        http: httpClientOver($fake, maxRetries: 0),
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        redirectUri: 'https://app.test/callback',
+        events: $listener,
+    );
+}
+
+it('goes on with the refreshed tokens when a TokensRefreshed listener throws during its own refresh', function () {
+    // The refresh succeeded and was persisted; a host's observability listener failing
+    // must not turn that into an Unconfirmed disconnect that never asked Xero.
+    $fake = fakeHttp();
+    $fake->queue(200, ['access_token' => 'fresh-token', 'expires_in' => 1800]);
+    $fake->queue(200, [['id' => 'conn-1', 'tenantId' => 'tenant-1']]);
+    $fake->queueRaw(204, '');
+
+    $listener = new class implements EventDispatcherInterface
+    {
+        public function dispatch(object $event): object
+        {
+            if ($event instanceof TokensRefreshed) {
+                throw new RuntimeException('Refresh listener unavailable');
+            }
+
+            return $event;
+        }
+    };
+
+    expect(xeroWithRefreshListener($fake, $listener)->disconnectTenant(connection(expires: '-1 hour')))->toBe(DisconnectOutcome::Removed)
+        ->and($fake->requests)->toHaveCount(3)
+        ->and($fake->requests[2]->getMethod())->toBe('DELETE')
+        ->and($fake->requests[2]->getHeaderLine('Authorization'))->toBe('Bearer fresh-token');
+});
+
+it('tells a healthy TokensRefreshed listener about the refresh inside a disconnect (control)', function () {
+    $fake = fakeHttp();
+    $fake->queue(200, ['access_token' => 'fresh-token', 'expires_in' => 1800]);
+    $fake->queue(200, [['id' => 'conn-1', 'tenantId' => 'tenant-1']]);
+    $fake->queueRaw(204, '');
+
+    $listener = new class implements EventDispatcherInterface
+    {
+        /** @var list<object> */
+        public array $events = [];
+
+        public function dispatch(object $event): object
+        {
+            $this->events[] = $event;
+
+            return $event;
+        }
+    };
+
+    expect(xeroWithRefreshListener($fake, $listener)->disconnectTenant(connection(expires: '-1 hour')))->toBe(DisconnectOutcome::Removed)
+        ->and($listener->events)->toHaveCount(1)
+        ->and($listener->events[0])->toBeInstanceOf(TokensRefreshed::class)
+        ->and($fake->requests[2]->getHeaderLine('Authorization'))->toBe('Bearer fresh-token');
+});
+
+it('returns the refreshed connection from refresh() even when a TokensRefreshed listener throws', function () {
+    // TokensRefreshed is observability only: the tokens are already persisted, so a
+    // listener failure is logged and the caller carries on with the new tokens.
+    $fake = fakeHttp();
+    $fake->queue(200, ['access_token' => 'fresh-token', 'expires_in' => 1800]);
+
+    $listener = new class implements EventDispatcherInterface
+    {
+        public function dispatch(object $event): object
+        {
+            throw new RuntimeException('Refresh listener unavailable');
+        }
+    };
+
+    expect(xeroWithRefreshListener($fake, $listener)->refresh(connection(expires: '-1 hour'))->accessToken)->toBe('fresh-token');
 });

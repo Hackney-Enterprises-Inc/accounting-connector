@@ -227,7 +227,10 @@ abstract class AbstractConnector implements AccountingConnector
         // matters because Intuit has already retired the old refresh token.
         $this->connections->persist($refreshed);
 
-        $this->dispatch(new TokensRefreshed($refreshed));
+        // Observability only, and the tokens are already persisted: a listener that
+        // throws must not fail the call that needed the refresh, or leave the caller
+        // holding the old tokens (a disconnect would stop before asking the provider).
+        $this->dispatchQuietly(new TokensRefreshed($refreshed));
 
         return $refreshed;
     }
@@ -421,7 +424,9 @@ abstract class AbstractConnector implements AccountingConnector
     }
 
     /**
-     * Dispatch from a method documented as never throwing.
+     * Dispatch an event whose outcome a listener cannot change: from a method
+     * documented as never throwing, or after the work it reports is done (tokens
+     * already persisted).
      *
      * A host listener that throws is the host's failure, not the result's: the result
      * stands and is returned. The failure is logged at error when the logger works,

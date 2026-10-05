@@ -134,7 +134,9 @@ reports neither; its closing date lives in Preferences, which this read does not
 it returns `false` rather than throwing, because the local disconnect must happen either way),
 then `ConnectionRepository::forget()` (or `markRevoked()` to keep the row for a "reconnect"
 banner), then drop cached lookups (`DatabaseLookupStore::flush()`).
-Where the connector implements `DisconnectsTenants` (Xero), use `disconnectTenant()` for the first
+Keep that order. Asking the provider can refresh an expired token first, and `persist()` writes
+the refreshed tokens only into a stored, active row: after `forget()` or `markRevoked()` they would
+go nowhere. Where the connector implements `DisconnectsTenants` (Xero), use `disconnectTenant()` for the first
 step instead: it says whether the app is gone at the provider or the person has to remove it there
 (see [Disconnecting at the provider](#disconnecting-at-the-provider)).
 
@@ -429,7 +431,7 @@ The package emits PSR-14 events; storing those events is the host's responsibili
 | `EntityCreated` | provider confirmed the id, before any attachment | `externalId` — record it immediately |
 | `EntityCreateFailed` | a create was refused or returned no id | `retryable` — validation needs a human, a rate limit just needs the job re-run |
 | `AttachmentUploaded` | an attachment attempt finished, either way | `result->uploaded` |
-| `TokensRefreshed` | tokens renewed and already persisted | observability only — do not persist from here |
+| `TokensRefreshed` | tokens renewed and already persisted | observability only: do not persist from here. A listener that throws is logged and the call carries on with the new tokens |
 | `ConnectionRevoked` | the grant is dead, a human must reconnect | `reason` |
 
 One deliberate gap: a create that dies in the pre-create token refresh raises (and, on a dead

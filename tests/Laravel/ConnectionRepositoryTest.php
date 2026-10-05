@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
+use Hei\AccountingConnector\Connectors\Xero\XeroConnector;
 use Hei\AccountingConnector\Contracts\ConnectionRepository;
 use Hei\AccountingConnector\Contracts\ConnectionStore;
 use Hei\AccountingConnector\Data\Connection;
 use Hei\AccountingConnector\Data\TokenSet;
+use Hei\AccountingConnector\Enums\DisconnectOutcome;
 use Hei\AccountingConnector\Enums\Provider;
 use Hei\AccountingConnector\Exceptions\AccountingConnectorException;
 use Hei\AccountingConnector\Laravel\DatabaseConnectionRepository;
@@ -345,4 +347,91 @@ it('still reads an undecryptable token as reconnect when the logger throws', fun
     DB::table('accounting_connections')->update(['access_token' => 'not-valid-ciphertext']);
 
     expect($repo->find('org-1', Provider::Xero))->toBeNull();
+});
+
+/*
+ * persist() and an empty tenant id. save() stores a Connection's tenantId as given, so
+ * '' is stored as ''; a host that writes its own rows may leave tenant_id NULL. A
+ * refresh carrying '' matches either; one naming a tenant never matches NULL.
+ */
+function emptyTenantCase(?string $stored_tenant, string $refreshed_tenant): array
+{
+    $logger = keepingLogger();
+    $repo = new DatabaseConnectionRepository(resolver: app('db'), encrypter: app('encrypter'), logger: $logger);
+
+    $repo->save(tenantConnection($stored_tenant ?? '', 'access-old', 'refresh-old', 'org-empty'));
+    DB::table('accounting_connections')->where('owner_id', 'org-empty')->update(['tenant_id' => $stored_tenant]);
+
+    $repo->persist(tenantConnection($refreshed_tenant, 'access-new', 'refresh-new', 'org-empty'));
+
+    $row = DB::table('accounting_connections')->where('owner_id', 'org-empty')->first();
+
+    return [Crypt::decryptString($row->access_token), $row->tenant_id, $logger->records];
+}
+
+it('persists a refresh with an empty tenant into a row stored with an empty tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase('', '');
+
+    expect($access)->toBe('access-new')->and($tenant)->toBe('')->and($logs)->toBe([]);
+});
+
+it('persists a refresh with an empty tenant into a host-written row with a NULL tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase(null, '');
+
+    expect($access)->toBe('access-new')->and($tenant)->toBeNull()->and($logs)->toBe([]);
+});
+
+it('persists nothing from a refresh naming a tenant into a row with a NULL tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase(null, 'tenant-A');
+
+    expect($access)->toBe('access-old')
+        ->and($tenant)->toBeNull()
+        ->and($logs)->toHaveCount(1)
+        ->and($logs[0]['level'])->toBe('warning')
+        ->and($logs[0]['message'])->not->toContain('will die');
+});
+
+it('persists nothing from a refresh with an empty tenant into a row naming a tenant', function () {
+    [$access, $tenant, $logs] = emptyTenantCase('tenant-A', '');
+
+    expect($access)->toBe('access-old')
+        ->and($tenant)->toBe('tenant-A')
+        ->and($logs)->toHaveCount(1)
+        ->and($logs[0]['level'])->toBe('warning');
+});
+
+it('persists the refresh a disconnect makes when the provider is asked before forget()', function () {
+    // The documented order: disconnect at the provider, then forget(). The refresh
+    // inside disconnectTenant() lands in a row that is still active.
+    $repo = app(ConnectionStore::class);
+    app(ConnectionRepository::class)->save(tenantConnection('tenant-1', 'access-old', 'refresh-old', 'org-order'));
+
+    $fake = fakeHttp();
+    $fake->queue(200, ['access_token' => 'fresh-token', 'refresh_token' => 'fresh-refresh', 'expires_in' => 1800]);
+    $fake->queue(200, [['id' => 'conn-1', 'tenantId' => 'tenant-1']]);
+    $fake->queueRaw(204, '');
+
+    $connector = new XeroConnector(
+        http: httpClientOver($fake, maxRetries: 0),
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        redirectUri: 'https://app.test/callback',
+        connections: $repo,
+    );
+
+    $expired = new Connection(
+        provider: Provider::Xero,
+        tenantId: 'tenant-1',
+        accessToken: 'access-old',
+        refreshToken: 'refresh-old',
+        expiresAt: (new DateTimeImmutable)->modify('-1 hour'),
+        reference: 'org-order',
+    );
+
+    expect($connector->disconnectTenant($expired))->toBe(DisconnectOutcome::Removed)
+        ->and(app(ConnectionRepository::class)->find('org-order', Provider::Xero)->accessToken)->toBe('fresh-token');
+
+    app(ConnectionRepository::class)->forget('org-order', Provider::Xero);
+
+    expect(app(ConnectionRepository::class)->find('org-order', Provider::Xero))->toBeNull();
 });

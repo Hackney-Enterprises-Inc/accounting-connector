@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the result is returned; a logger failure is ignored. The same protection now covers `revoke()`
   on both connectors, `disconnectTenant()`, and the decrypt-failure log in
   `DatabaseConnectionRepository`.
+- A `TokensRefreshed` listener that throws no longer fails the call that needed the refresh.
+  The tokens are already persisted when the event fires, so the failure is logged at error
+  and the call carries on with the new tokens; before, any provider call that refreshed (an
+  entity create, a lookup, a disconnect) threw the listener's exception and dropped the
+  refreshed connection. The event is documented as observability only; a host that relied
+  on a throwing listener to stop the call must check its own state instead.
 
 ### Changed
 
