@@ -1410,6 +1410,8 @@ final class FakeConnector implements AccountingConnector, CodesBankTransactions,
         $this->attached = [];
         $this->contacts = [];
         $this->refreshed = [];
+        $this->disconnectedTenants = [];
+        $this->nextDisconnectOutcome = null;
         $this->sequence = 0;
         $this->unreportedSequence = 0;
         $this->lookupRefreshes = 0;

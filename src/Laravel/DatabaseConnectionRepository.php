@@ -174,18 +174,23 @@ final class DatabaseConnectionRepository implements ConnectionRepository, Connec
             $stored = $this->rowFor($owner, $connection->provider)->first(['tenant_id', 'status']);
 
             if ($stored !== null) {
-                $this->logger->warning(
-                    'Refreshed accounting tokens were NOT persisted: the stored connection is no longer this tenant '
-                    .'or is no longer active (reconnected, revoked or disconnected while the refresh was in flight). '
-                    .'The stored connection was left as it is.',
-                    [
-                        'provider' => $connection->provider->value,
-                        'connection' => $owner,
-                        'refreshed_tenant_id' => $connection->tenantId,
-                        'stored_tenant_id' => $stored->tenant_id,
-                        'stored_status' => $stored->status,
-                    ],
-                );
+                try {
+                    $this->logger->warning(
+                        'Refreshed accounting tokens were NOT persisted: the stored connection is no longer this tenant '
+                        .'or is no longer active (reconnected, revoked or disconnected while the refresh was in flight). '
+                        .'The stored connection was left as it is.',
+                        [
+                            'provider' => $connection->provider->value,
+                            'connection' => $owner,
+                            'refreshed_tenant_id' => $connection->tenantId,
+                            'stored_tenant_id' => $stored->tenant_id,
+                            'stored_status' => $stored->status,
+                        ],
+                    );
+                } catch (\Throwable) {
+                    // An expected race, skipped on purpose: a logger that cannot write
+                    // must not turn the skip into a failed refresh.
+                }
 
                 return;
             }

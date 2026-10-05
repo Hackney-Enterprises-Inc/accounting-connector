@@ -435,3 +435,27 @@ it('persists the refresh a disconnect makes when the provider is asked before fo
 
     expect(app(ConnectionRepository::class)->find('org-order', Provider::Xero))->toBeNull();
 });
+
+it('skips a stale refresh without throwing when the logger itself fails', function () {
+    // The stale-row skip is an expected race; a logger that cannot write must not
+    // turn it into a failed refresh, and must not let the stale tokens through.
+    $logger = new class extends AbstractLogger
+    {
+        public function log($level, string|Stringable $message, array $context = []): void
+        {
+            throw new RuntimeException('the log channel is down');
+        }
+    };
+    $repo = new DatabaseConnectionRepository(resolver: app('db'), encrypter: app('encrypter'), logger: $logger);
+
+    $repo->save(tenantConnection('tenant-A', 'access-A', 'refresh-A'));
+    $inFlight = $repo->find('org-reconnect', Provider::Xero);
+    $repo->save(tenantConnection('tenant-B', 'access-B', 'refresh-B'));
+
+    $repo->persist($inFlight->withTokens(new TokenSet('refreshed-access-A', 'refreshed-refresh-A', (new DateTimeImmutable)->modify('+30 minutes'))));
+
+    $stored = $repo->find('org-reconnect', Provider::Xero);
+    expect($stored->tenantId)->toBe('tenant-B')
+        ->and($stored->accessToken)->toBe('access-B')
+        ->and($stored->refreshToken)->toBe('refresh-B');
+});
